@@ -1,0 +1,59 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+
+# Virtual Environment
+.venv/
+venv/
+ENV/
+env/
+
+# Database
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+data/*.db
+data/*.db-backup.*
+
+# Logs
+logs/
+*.log
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# Telegram session files
+*.session
+*.session-journal
+/tmp/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# History exports (可能包含敏感数据)
+history/
+
+# Backup files
+*.backup
+*.bak
+
+# Sensitive config (if any)
+credentials.json
+secrets.json
