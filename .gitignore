@@ -49,6 +49,7 @@ Thumbs.db
 
 # History exports (可能包含敏感数据)
 history/
+data_export/
 
 # Backup files
 *.backup
@@ -57,3 +58,14 @@ history/
 # Sensitive config (if any)
 credentials.json
 secrets.json
+
+# Telegram sessions directory
+sessions/
+
+# Temporary directories
+sucaiku/
+temp/
+tmp/
+
+# Python version files
+=*.*.*

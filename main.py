@@ -10,7 +10,7 @@ import os
 import shutil
 import sqlite3
 from datetime import datetime
-from telethon import TelegramClient
+from telethon import TelegramClient, events
 from telethon.errors import SessionPasswordNeededError
 import config
 from database import init_database, get_database_stats, get_session
@@ -102,6 +102,7 @@ def check_telegram_session_health(session_path):
             return True
         else:
             # Session 数据库损坏
+            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [TG] session_health_check_failed integrity='{result[0] if result else 'FAILED'}'")
             print(f"\n{'='*70}")
             print(f"❌ Telegram Session 文件损坏")
             print(f"{'='*70}")
@@ -114,6 +115,7 @@ def check_telegram_session_health(session_path):
 
             try:
                 shutil.move(session_file, backup_path)
+                print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [TG] session_isolated backup_path={backup_path}")
                 print(f"\n✓ 已将损坏的 session 文件备份到:")
                 print(f"   {backup_path}")
 
@@ -239,6 +241,16 @@ class TelegramReportBot:
         me = await self.client.get_me()
         print(f"✓ 已登录: {me.first_name} (@{me.username})")
 
+        # 结构化连接日志
+        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [TG] connected user={me.username or me.first_name} user_id={me.id} chat_id={config.TARGET_CHAT_ID}")
+
+        # 注册断线事件处理器
+        @self.client.on(events.Raw)
+        async def handle_disconnect(event):
+            """处理 Telegram 断线事件"""
+            if hasattr(event, '_disconnected') and event._disconnected:
+                print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [TG] disconnected reason='connection lost'")
+
         # 4. 设置消息监听器
         print("\n[4/5] 设置消息监听器...")
         self.listener = MessageListener(self.client)
@@ -275,6 +287,7 @@ class TelegramReportBot:
             print(f"\n[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [ERROR] sqlite_error={error_msg}")
 
             if 'malformed' in error_msg.lower() or 'corrupt' in error_msg.lower():
+                print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [TG] session_corrupt detected reason='database malformed'")
                 print("⚠️ 检测到 session 数据库损坏，尝试自动修复...")
 
                 # 备份损坏的 session
@@ -284,6 +297,7 @@ class TelegramReportBot:
                     backup_path = f"{session_file}.corrupt.{timestamp}"
                     try:
                         shutil.move(session_file, backup_path)
+                        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [TG] session_isolated backup_path={backup_path}")
                         print(f"✓ 已备份损坏的 session: {backup_path}")
 
                         # 同时备份 journal
@@ -295,9 +309,11 @@ class TelegramReportBot:
                     except Exception as backup_error:
                         print(f"⚠️ 备份失败: {backup_error}")
 
+                print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [TG] graceful_exit reason='session_corrupt'")
                 print("\n📋 Session 已损坏，进程将退出")
                 print("请运行: python auto_auth.py 重新认证后再启动")
             else:
+                print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [TG] unknown_sqlite_error reason='{error_msg}'")
                 print(f"⚠️ 未知的 SQLite 错误，进程将退出")
 
         except Exception as e:
@@ -400,8 +416,16 @@ async def main():
 
         except Exception as e:
             retry_count += 1
+            error_type = type(e).__name__
+            error_msg = str(e)
             print(f"\n[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [ERROR] retry={retry_count}/{max_retries}")
             print(f"✗ 系统错误: {e}")
+
+            # 计算下次重试的退避时间
+            if retry_count < max_retries:
+                next_delay = min(base_delay * (2 ** retry_count), max_delay)
+                print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [TG] reconnecting reason='{error_type}: {error_msg[:100]}' backoff_s={next_delay}")
+
             import traceback
             traceback.print_exc()
 

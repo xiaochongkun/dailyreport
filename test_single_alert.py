@@ -1,229 +1,143 @@
-#!/usr/bin/env python3
 """
-单笔预警测试脚本（用于验证 OPTIONS ONLY 过滤逻辑）
+测试单笔大宗预警邮件（多腿解析）
+从数据库查询指定消息并发送测试预警邮件
 """
 
-import sys
-import asyncio
 from datetime import datetime
-import pytz
-
-import config
+import argparse
+import asyncio
 from database import get_session, Message
-from message_listener import send_alert_email
 from report_generator import parse_block_trade_message
+from email_sender import send_single_trade_alert_html
+import config
 
 
-# 测试窗口
-TZ = pytz.timezone(config.REPORT_TIMEZONE)
-START_TIME = TZ.localize(datetime(2025, 12, 11, 16, 0, 0))
-END_TIME = TZ.localize(datetime(2025, 12, 12, 16, 0, 0))
+async def test_single_alert(msg_id: int = None, send_test: bool = False):
+    """
+    测试单笔预警邮件
 
-
-async def test_single_message(msg_id: int, send_email: bool = False):
-    """测试单条消息的预警逻辑"""
-    print("\n" + "=" * 70)
-    print(f"测试单条消息 (msg_id={msg_id})")
-    print("=" * 70)
+    Args:
+        msg_id: 消息ID（如果未指定，查找最近的多腿消息）
+        send_test: 是否发送测试邮件
+    """
+    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [TEST_ALERT] start msg_id={msg_id} send_test={send_test}")
 
     session = get_session()
     try:
-        msg = session.query(Message).filter_by(message_id=msg_id).first()
+        # 查询消息
+        if msg_id:
+            message = session.query(Message).filter_by(message_id=msg_id).first()
+            if not message:
+                print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [TEST_ALERT] error='message not found' msg_id={msg_id}")
+                return
+        else:
+            # 查找最近的包含多个"Bought"/"Sold"的消息（多腿）
+            messages = session.query(Message).filter(Message.is_block_trade == True).order_by(Message.date.desc()).limit(50).all()
+            message = None
+            for msg in messages:
+                if msg.text and msg.text.count('Bought') + msg.text.count('Sold') >= 2:
+                    message = msg
+                    break
 
-        if not msg:
-            print(f"❌ 未找到 msg_id={msg_id} 的消息")
-            return
+            if not message:
+                print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [TEST_ALERT] error='no multi-leg message found'")
+                return
+
+        print(f"\n" + "=" * 60)
+        print(f"测试消息: message_id={message.message_id}")
+        print(f"时间: {message.date}")
+        print("=" * 60)
 
         # 解析消息
-        trade_info = parse_block_trade_message(msg.text or '')
+        trade_info = parse_block_trade_message(message.text or '')
 
-        print(f"\n[消息信息]")
-        print(f"  Message ID: {msg.message_id}")
-        print(f"  Date: {msg.date}")
-        print(f"  Is Block Trade: {msg.is_block_trade}")
+        # 提取腿信息
+        options_legs = trade_info.get('options_legs', [])
+        non_options_legs = trade_info.get('non_options_legs', [])
 
-        print(f"\n[解析结果]")
-        print(f"  Asset: {trade_info.get('asset')}")
-        print(f"  Volume: {trade_info.get('volume')}")
-        print(f"  Exchange: {trade_info.get('exchange')}")
-        print(f"  Instrument Type: {trade_info.get('instrument_type')}")
-        print(f"  Contract: {trade_info.get('contract')}")
-        print(f"  Strategy: {trade_info.get('strategy')}")
-        print(f"  Side: {trade_info.get('side')}")
+        print(f"\n解析结果:")
+        print(f"  资产: {trade_info['asset']}")
+        print(f"  交易所: {trade_info['exchange']}")
+        print(f"  期权腿数: {len(options_legs)}")
+        print(f"  非期权腿数: {len(non_options_legs)}")
 
-        print(f"\n[原始消息]")
-        print(msg.text[:500])
+        print(f"\n期权腿详情:")
+        for i, leg in enumerate(options_legs, 1):
+            print(f"  腿 #{i}:")
+            print(f"    合约: {leg.get('contract')}")
+            print(f"    方向: {leg.get('side')}")
+            print(f"    数量: {leg.get('volume')}x")
+            print(f"    价格: {leg.get('price_btc')} ₿ (${leg.get('price_usd')})")
+            print(f"    Total: {leg.get('total_btc')} ₿ (${leg.get('total_usd')})")
+            print(f"    IV: {leg.get('iv')}%")
+            print(f"    Ref: ${leg.get('ref_spot_usd')}")
 
-        # 测试预警逻辑
-        print(f"\n[预警逻辑测试]")
-        print(f"  VOLUME_ALERT_ENABLED: {config.VOLUME_ALERT_ENABLED}")
-        print(f"  EMAIL_ENABLED: {config.EMAIL_ENABLED}")
+        if non_options_legs:
+            print(f"\n非期权腿详情:")
+            for i, leg in enumerate(non_options_legs, 1):
+                print(f"  腿 #{i}:")
+                print(f"    合约: {leg.get('contract')}")
+                print(f"    类型: {leg.get('instrument_type')}")
+                print(f"    方向: {leg.get('side')}")
+                print(f"    数量: {leg.get('volume')}x")
 
-        if not send_email:
-            print("  ⚠️  dry-run 模式（不实际发送邮件）")
-            config.EMAIL_ENABLED = False
+        # 计算最大volume
+        options_max_volume = max([leg.get('volume', 0) for leg in options_legs], default=0)
+        print(f"\n期权最大数量: {options_max_volume}x")
 
-        message_data = {
-            'message_id': msg.message_id,
-            'date': msg.date.isoformat(),
-            'text': msg.text,
-            'is_block_trade': msg.is_block_trade
-        }
+        # 确定阈值
+        asset = trade_info['asset']
+        if asset == 'BTC':
+            threshold = config.BTC_VOLUME_THRESHOLD
+        elif asset == 'ETH':
+            threshold = config.ETH_VOLUME_THRESHOLD_TEST if config.ALERT_TEST_MODE else config.ETH_VOLUME_THRESHOLD
+        else:
+            threshold = 200
 
-        print("\n开始调用 send_alert_email()...\n")
-        await send_alert_email(message_data)
+        print(f"阈值: {threshold}x")
+        print(f"触发: {'✅ YES' if options_max_volume > threshold else '❌ NO'}")
 
-        print("\n✓ 测试完成")
+        # 发送测试邮件
+        if send_test:
+            print(f"\n发送测试预警邮件...")
+            message_data = {
+                'message_id': message.message_id,
+                'date': message.date.isoformat(),
+                'text': message.text,
+                'is_block_trade': True
+            }
 
-    finally:
-        session.close()
+            success = send_single_trade_alert_html(
+                trade_info=trade_info,
+                message_data=message_data,
+                threshold=threshold,
+                lang='zh',
+                test_mode=True
+            )
 
+            if success:
+                print(f"\n✅ 测试邮件发送成功！")
+                print(f"  主题: 【TEST】单笔大宗期权预警 - {asset} - ...")
+                print(f"  请检查邮箱收件！")
+            else:
+                print(f"\n❌ 测试邮件发送失败")
+        else:
+            print(f"\n提示: 使用 --send-test 参数发送测试邮件")
 
-async def test_perpetual_skip():
-    """测试 PERPETUAL 会被跳过"""
-    print("\n" + "=" * 70)
-    print("测试 PERPETUAL/FUTURES 跳过逻辑")
-    print("=" * 70)
-
-    session = get_session()
-    try:
-        # 查找 PERPETUAL 消息
-        messages = session.query(Message).filter(
-            Message.date >= START_TIME,
-            Message.date < END_TIME,
-            Message.is_block_trade == True
-        ).all()
-
-        perpetual_msgs = []
-        for msg in messages:
-            trade_info = parse_block_trade_message(msg.text or '')
-            if trade_info.get('instrument_type') == 'PERPETUAL':
-                perpetual_msgs.append(msg)
-
-        if not perpetual_msgs:
-            print("⚠️  未找到 PERPETUAL 消息")
-            return
-
-        print(f"\n找到 {len(perpetual_msgs)} 条 PERPETUAL 消息，测试第一条...\n")
-
-        msg = perpetual_msgs[0]
-        message_data = {
-            'message_id': msg.message_id,
-            'date': msg.date.isoformat(),
-            'text': msg.text,
-            'is_block_trade': msg.is_block_trade
-        }
-
-        print(f"Message ID: {msg.message_id}")
-        print(f"应该看到: [ALERT_SKIP] reason=non_option\n")
-
-        # 确保配置开启（但临时替换发送函数以避免实际发送邮件）
-        original_volume_alert = config.VOLUME_ALERT_ENABLED
-        original_email = config.EMAIL_ENABLED
-        original_password = config.EMAIL_PASSWORD
-
-        config.VOLUME_ALERT_ENABLED = True
-        config.EMAIL_ENABLED = True  # 必须开启才能看到完整日志
-        config.EMAIL_PASSWORD = ""  # 清空密码，阻止实际发送
-
-        await send_alert_email(message_data)
-
-        config.VOLUME_ALERT_ENABLED = original_volume_alert
-        config.EMAIL_ENABLED = original_email
-        config.EMAIL_PASSWORD = original_password
+    except Exception as e:
+        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [TEST_ALERT] error={e}")
+        import traceback
+        traceback.print_exc()
 
     finally:
         session.close()
-
-
-async def test_btc_option_alert():
-    """测试 BTC OPTIONS volume > 200 的预警"""
-    print("\n" + "=" * 70)
-    print("测试 BTC OPTIONS 预警（volume > 200）")
-    print("=" * 70)
-
-    session = get_session()
-    try:
-        messages = session.query(Message).filter(
-            Message.date >= START_TIME,
-            Message.date < END_TIME,
-            Message.is_block_trade == True
-        ).all()
-
-        # 找到 BTC OPTIONS volume > 200 的消息
-        btc_options = []
-        for msg in messages:
-            trade_info = parse_block_trade_message(msg.text or '')
-            if (trade_info.get('asset') == 'BTC' and
-                trade_info.get('instrument_type') == 'OPTIONS' and
-                trade_info.get('volume', 0) > 200):
-                btc_options.append((msg, trade_info))
-
-        if not btc_options:
-            print("⚠️  未找到满足条件的 BTC OPTIONS 交易")
-            return
-
-        print(f"\n找到 {len(btc_options)} 条符合条件的 BTC OPTIONS，测试第一条...\n")
-
-        msg, trade_info = btc_options[0]
-        print(f"Message ID: {msg.message_id}")
-        print(f"Contract: {trade_info.get('contract')}")
-        print(f"Volume: {trade_info.get('volume'):.1f}x")
-        print(f"应该看到: [ALERT_SEND] option_trade\n")
-
-        message_data = {
-            'message_id': msg.message_id,
-            'date': msg.date.isoformat(),
-            'text': msg.text,
-            'is_block_trade': msg.is_block_trade
-        }
-
-        # 确保配置开启（但临时替换发送函数以避免实际发送邮件）
-        original_volume_alert = config.VOLUME_ALERT_ENABLED
-        original_email = config.EMAIL_ENABLED
-        original_password = config.EMAIL_PASSWORD
-
-        config.VOLUME_ALERT_ENABLED = True
-        config.EMAIL_ENABLED = True  # 必须开启才能看到完整日志
-        config.EMAIL_PASSWORD = ""  # 清空密码，阻止实际发送
-
-        await send_alert_email(message_data)
-
-        config.VOLUME_ALERT_ENABLED = original_volume_alert
-        config.EMAIL_ENABLED = original_email
-        config.EMAIL_PASSWORD = original_password
-
-    finally:
-        session.close()
-
-
-def main():
-    import argparse
-
-    parser = argparse.ArgumentParser(description='单笔预警测试脚本')
-    parser.add_argument('--msg-id', type=int, help='测试指定的 message_id')
-    parser.add_argument('--test-perpetual', action='store_true', help='测试 PERPETUAL 跳过逻辑')
-    parser.add_argument('--test-btc-alert', action='store_true', help='测试 BTC OPTIONS 预警')
-    parser.add_argument('--send-email', action='store_true', help='实际发送邮件')
-
-    args = parser.parse_args()
-
-    if args.msg_id:
-        asyncio.run(test_single_message(args.msg_id, send_email=args.send_email))
-    elif args.test_perpetual:
-        asyncio.run(test_perpetual_skip())
-    elif args.test_btc_alert:
-        asyncio.run(test_btc_option_alert())
-    else:
-        print("请使用以下参数之一:")
-        print("  --msg-id <id>        测试指定消息")
-        print("  --test-perpetual     测试 PERPETUAL 跳过逻辑")
-        print("  --test-btc-alert     测试 BTC OPTIONS 预警")
-        print("\n示例:")
-        print("  python3 test_single_alert.py --test-perpetual")
-        print("  python3 test_single_alert.py --test-btc-alert")
-        print("  python3 test_single_alert.py --msg-id 340715 --send-email")
 
 
 if __name__ == '__main__':
-    main()
+    parser = argparse.ArgumentParser(description='测试单笔大宗预警邮件')
+    parser.add_argument('--msg-id', type=int, help='消息ID（可选，不指定则自动查找多腿消息）')
+    parser.add_argument('--send-test', action='store_true', help='发送测试邮件')
+
+    args = parser.parse_args()
+
+    asyncio.run(test_single_alert(msg_id=args.msg_id, send_test=args.send_test))

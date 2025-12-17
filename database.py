@@ -242,6 +242,9 @@ def set_sqlite_pragma(dbapi_conn, connection_record):
     # 启用外键约束
     cursor.execute("PRAGMA foreign_keys = ON")
 
+    # 设置 busy_timeout（5秒），防止并发写入时立即失败
+    cursor.execute("PRAGMA busy_timeout = 5000")
+
     cursor.close()
 
 

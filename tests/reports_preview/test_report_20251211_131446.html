@@ -1,0 +1,604 @@
+
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="UTF-8">
+        <style>
+            body {
+                font-family: Arial, sans-serif;
+                line-height: 1.6;
+                color: #333;
+                max-width: 800px;
+                margin: 0 auto;
+                padding: 20px;
+            }
+            h1 {
+                color: #2c3e50;
+                border-bottom: 3px solid #3498db;
+                padding-bottom: 10px;
+            }
+            h2 {
+                color: #34495e;
+                margin-top: 30px;
+            }
+            .section {
+                background: #f8f9fa;
+                padding: 15px;
+                border-radius: 5px;
+                margin: 15px 0;
+            }
+            .stats {
+                display: flex;
+                justify-content: space-around;
+                margin: 20px 0;
+            }
+            .stat-box {
+                text-align: center;
+                padding: 15px;
+                background: white;
+                border-radius: 5px;
+                box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            }
+            .stat-number {
+                font-size: 32px;
+                font-weight: bold;
+                color: #3498db;
+            }
+            .stat-label {
+                font-size: 14px;
+                color: #7f8c8d;
+            }
+            table {
+                width: 100%;
+                border-collapse: collapse;
+                margin: 15px 0;
+            }
+            th, td {
+                padding: 10px;
+                text-align: left;
+                border-bottom: 1px solid #ddd;
+            }
+            th {
+                background-color: #3498db;
+                color: white;
+            }
+            .trade-card {
+                background: white;
+                padding: 15px;
+                margin: 15px 0;
+                border-left: 4px solid #e74c3c;
+                box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            }
+            .trade-header {
+                font-size: 18px;
+                font-weight: bold;
+                color: #e74c3c;
+                margin-bottom: 10px;
+            }
+            .greeks {
+                display: grid;
+                grid-template-columns: repeat(5, 1fr);
+                gap: 10px;
+                margin-top: 10px;
+            }
+            .greek-item {
+                text-align: center;
+                padding: 8px;
+                background: #ecf0f1;
+                border-radius: 3px;
+            }
+        </style>
+    </head>
+    <body>
+        <h1>📊 SignalPlus Trade Alert 每日报告</h1>
+
+        <div class="section">
+            <h2>📅 1. 统计时间范围</h2>
+            <p><strong>开始时间:</strong> 2025-12-10 20:27:31 CST</p>
+            <p><strong>结束时间:</strong> 2025-12-11 20:27:31 CST</p>
+            <p><strong>时区:</strong> Asia/Shanghai</p>
+        </div>
+
+        <div class="section">
+            <h2>💰 2. 当日关键市场指标</h2>
+            <div class="stats">
+                <div class="stat-box">
+                    <div class="stat-number">$0.00</div>
+                    <div class="stat-label">BTC 现货价格</div>
+                </div>
+                <div class="stat-box">
+                    <div class="stat-number">$0.00</div>
+                    <div class="stat-label">ETH 现货价格</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="section">
+            <h2>📈 3. 大宗交易统计</h2>
+            <div class="stats">
+                <div class="stat-box">
+                    <div class="stat-number">292</div>
+                    <div class="stat-label">总笔数</div>
+                </div>
+                <div class="stat-box">
+                    <div class="stat-number">208</div>
+                    <div class="stat-label">BTC 笔数</div>
+                </div>
+                <div class="stat-box">
+                    <div class="stat-number">84</div>
+                    <div class="stat-label">ETH 笔数</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="section">
+            <h2>🏆 4. Top 3 交易排名</h2>
+
+            <!-- BTC 部分 -->
+            <div style="margin: 30px 0;">
+                <h2 style="color: #f39c12;">🔶 BTC 交易</h2>
+
+                <div style="margin: 20px 0;">
+                    <h3>💰 按金额排名 Top 3</h3>
+        <div class="trade-card">
+            <div class="trade-header">#1 - 2025-12-11 10:00:22</div>
+            <table>
+                <tr><td><strong>交易策略:</strong></td><td>Unknown</td></tr>
+                <tr><td><strong>💰 交易金额:</strong></td><td><span style="color: #e74c3c; font-size: 18px; font-weight: bold;">$1,679,290.00</span></td></tr>
+                <tr><td><strong>合约:</strong></td><td>BTC-27FEB26-86000-P</td></tr>
+                <tr><td><strong>价格:</strong></td><td>0.0537 ₿ ($4,871.84)</td></tr>
+                <tr><td><strong>IV:</strong></td><td>44.88%</td></tr>
+            </table>
+            <h4>希腊字母:</h4>
+            
+        <div class="greeks">
+            <div class="greek-item">
+                <strong>Delta</strong><br>
+                N/A
+            </div>
+            <div class="greek-item">
+                <strong>Gamma</strong><br>
+                N/A
+            </div>
+            <div class="greek-item">
+                <strong>Vega</strong><br>
+                N/A
+            </div>
+            <div class="greek-item">
+                <strong>Theta</strong><br>
+                N/A
+            </div>
+            <div class="greek-item">
+                <strong>Rho</strong><br>
+                N/A
+            </div>
+        </div>
+        
+        </div>
+        
+        <div class="trade-card">
+            <div class="trade-header">#2 - 2025-12-11 11:46:54</div>
+            <table>
+                <tr><td><strong>交易策略:</strong></td><td>Unknown</td></tr>
+                <tr><td><strong>💰 交易金额:</strong></td><td><span style="color: #e74c3c; font-size: 18px; font-weight: bold;">$1,061,490.00</span></td></tr>
+                <tr><td><strong>合约:</strong></td><td>BTC-26DEC25-94000-C</td></tr>
+                <tr><td><strong>价格:</strong></td><td>0.018 ₿ ($1,616.49)</td></tr>
+                <tr><td><strong>IV:</strong></td><td>43.54%</td></tr>
+            </table>
+            <h4>希腊字母:</h4>
+            
+        <div class="greeks">
+            <div class="greek-item">
+                <strong>Delta</strong><br>
+                N/A
+            </div>
+            <div class="greek-item">
+                <strong>Gamma</strong><br>
+                N/A
+            </div>
+            <div class="greek-item">
+                <strong>Vega</strong><br>
+                N/A
+            </div>
+            <div class="greek-item">
+                <strong>Theta</strong><br>
+                N/A
+            </div>
+            <div class="greek-item">
+                <strong>Rho</strong><br>
+                N/A
+            </div>
+        </div>
+        
+        </div>
+        
+        <div class="trade-card">
+            <div class="trade-header">#3 - 2025-12-11 15:23:10</div>
+            <table>
+                <tr><td><strong>交易策略:</strong></td><td>Unknown</td></tr>
+                <tr><td><strong>💰 交易金额:</strong></td><td><span style="color: #e74c3c; font-size: 18px; font-weight: bold;">$656,660.00</span></td></tr>
+                <tr><td><strong>合约:</strong></td><td>BTC-26DEC25-90000-C</td></tr>
+                <tr><td><strong>价格:</strong></td><td>0.0364 ₿ ($3,283.30)</td></tr>
+                <tr><td><strong>IV:</strong></td><td>42.83%</td></tr>
+            </table>
+            <h4>希腊字母:</h4>
+            
+        <div class="greeks">
+            <div class="greek-item">
+                <strong>Delta</strong><br>
+                N/A
+            </div>
+            <div class="greek-item">
+                <strong>Gamma</strong><br>
+                N/A
+            </div>
+            <div class="greek-item">
+                <strong>Vega</strong><br>
+                N/A
+            </div>
+            <div class="greek-item">
+                <strong>Theta</strong><br>
+                N/A
+            </div>
+            <div class="greek-item">
+                <strong>Rho</strong><br>
+                N/A
+            </div>
+        </div>
+        
+        </div>
+        
+                </div>
+
+                <div style="margin: 20px 0;">
+                    <h3>📦 按数量排名 Top 3</h3>
+        <div class="trade-card">
+            <div class="trade-header">#1 - 2025-12-11 05:41:28</div>
+            <table>
+                <tr><td><strong>交易策略:</strong></td><td>Unknown</td></tr>
+                <tr><td><strong>📦 合约数量:</strong></td><td><span style="color: #e74c3c; font-size: 18px; font-weight: bold;">1942500.0x</span></td></tr>
+                <tr><td><strong>合约:</strong></td><td>Unknown</td></tr>
+                <tr><td><strong>价格:</strong></td><td>Unknown</td></tr>
+                <tr><td><strong>IV:</strong></td><td>Unknown</td></tr>
+            </table>
+            <h4>希腊字母:</h4>
+            
+        <div class="greeks">
+            <div class="greek-item">
+                <strong>Delta</strong><br>
+                N/A
+            </div>
+            <div class="greek-item">
+                <strong>Gamma</strong><br>
+                N/A
+            </div>
+            <div class="greek-item">
+                <strong>Vega</strong><br>
+                N/A
+            </div>
+            <div class="greek-item">
+                <strong>Theta</strong><br>
+                N/A
+            </div>
+            <div class="greek-item">
+                <strong>Rho</strong><br>
+                N/A
+            </div>
+        </div>
+        
+        </div>
+        
+        <div class="trade-card">
+            <div class="trade-header">#2 - 2025-12-11 04:29:59</div>
+            <table>
+                <tr><td><strong>交易策略:</strong></td><td>LONG BTC RISK REVERSAL</td></tr>
+                <tr><td><strong>📦 合约数量:</strong></td><td><span style="color: #e74c3c; font-size: 18px; font-weight: bold;">250.0x</span></td></tr>
+                <tr><td><strong>合约:</strong></td><td>BTC-13DEC25-90000-P</td></tr>
+                <tr><td><strong>价格:</strong></td><td>0.0047 ₿ ($439.62)</td></tr>
+                <tr><td><strong>IV:</strong></td><td>54.63%</td></tr>
+            </table>
+            <h4>希腊字母:</h4>
+            
+        <div class="greeks">
+            <div class="greek-item">
+                <strong>Delta</strong><br>
+                N/A
+            </div>
+            <div class="greek-item">
+                <strong>Gamma</strong><br>
+                N/A
+            </div>
+            <div class="greek-item">
+                <strong>Vega</strong><br>
+                N/A
+            </div>
+            <div class="greek-item">
+                <strong>Theta</strong><br>
+                N/A
+            </div>
+            <div class="greek-item">
+                <strong>Rho</strong><br>
+                N/A
+            </div>
+        </div>
+        
+        </div>
+        
+        <div class="trade-card">
+            <div class="trade-header">#3 - 2025-12-11 04:30:47</div>
+            <table>
+                <tr><td><strong>交易策略:</strong></td><td>LONG BTC RISK REVERSAL</td></tr>
+                <tr><td><strong>📦 合约数量:</strong></td><td><span style="color: #e74c3c; font-size: 18px; font-weight: bold;">250.0x</span></td></tr>
+                <tr><td><strong>合约:</strong></td><td>BTC-13DEC25-90000-P</td></tr>
+                <tr><td><strong>价格:</strong></td><td>0.0046 ₿ ($430.60)</td></tr>
+                <tr><td><strong>IV:</strong></td><td>54.87%</td></tr>
+            </table>
+            <h4>希腊字母:</h4>
+            
+        <div class="greeks">
+            <div class="greek-item">
+                <strong>Delta</strong><br>
+                N/A
+            </div>
+            <div class="greek-item">
+                <strong>Gamma</strong><br>
+                N/A
+            </div>
+            <div class="greek-item">
+                <strong>Vega</strong><br>
+                N/A
+            </div>
+            <div class="greek-item">
+                <strong>Theta</strong><br>
+                N/A
+            </div>
+            <div class="greek-item">
+                <strong>Rho</strong><br>
+                N/A
+            </div>
+        </div>
+        
+        </div>
+        
+                </div>
+            </div>
+
+            <!-- ETH 部分 -->
+            <div style="margin: 30px 0;">
+                <h2 style="color: #627eea;">🔷 ETH 交易</h2>
+
+                <div style="margin: 20px 0;">
+                    <h3>💰 按金额排名 Top 3</h3>
+        <div class="trade-card">
+            <div class="trade-header">#1 - 2025-12-10 20:28:11</div>
+            <table>
+                <tr><td><strong>交易策略:</strong></td><td>LONG ETH RISK REVERSAL</td></tr>
+                <tr><td><strong>💰 交易金额:</strong></td><td><span style="color: #e74c3c; font-size: 18px; font-weight: bold;">$271,510.00</span></td></tr>
+                <tr><td><strong>合约:</strong></td><td>ETH-27MAR26-4000-C</td></tr>
+                <tr><td><strong>价格:</strong></td><td>Unknown</td></tr>
+                <tr><td><strong>IV:</strong></td><td>68.52%</td></tr>
+            </table>
+            <h4>希腊字母:</h4>
+            
+        <div class="greeks">
+            <div class="greek-item">
+                <strong>Delta</strong><br>
+                N/A
+            </div>
+            <div class="greek-item">
+                <strong>Gamma</strong><br>
+                N/A
+            </div>
+            <div class="greek-item">
+                <strong>Vega</strong><br>
+                N/A
+            </div>
+            <div class="greek-item">
+                <strong>Theta</strong><br>
+                N/A
+            </div>
+            <div class="greek-item">
+                <strong>Rho</strong><br>
+                N/A
+            </div>
+        </div>
+        
+        </div>
+        
+        <div class="trade-card">
+            <div class="trade-header">#2 - 2025-12-11 14:43:07</div>
+            <table>
+                <tr><td><strong>交易策略:</strong></td><td>SHORT ETH STRADDLE</td></tr>
+                <tr><td><strong>💰 交易金额:</strong></td><td><span style="color: #e74c3c; font-size: 18px; font-weight: bold;">$204,050.00</span></td></tr>
+                <tr><td><strong>合约:</strong></td><td>ETH-27FEB26-3200-P</td></tr>
+                <tr><td><strong>价格:</strong></td><td>Unknown</td></tr>
+                <tr><td><strong>IV:</strong></td><td>67.43%</td></tr>
+            </table>
+            <h4>希腊字母:</h4>
+            
+        <div class="greeks">
+            <div class="greek-item">
+                <strong>Delta</strong><br>
+                N/A
+            </div>
+            <div class="greek-item">
+                <strong>Gamma</strong><br>
+                N/A
+            </div>
+            <div class="greek-item">
+                <strong>Vega</strong><br>
+                N/A
+            </div>
+            <div class="greek-item">
+                <strong>Theta</strong><br>
+                N/A
+            </div>
+            <div class="greek-item">
+                <strong>Rho</strong><br>
+                N/A
+            </div>
+        </div>
+        
+        </div>
+        
+        <div class="trade-card">
+            <div class="trade-header">#3 - 2025-12-10 20:27:54</div>
+            <table>
+                <tr><td><strong>交易策略:</strong></td><td>LONG ETH RISK REVERSAL</td></tr>
+                <tr><td><strong>💰 交易金额:</strong></td><td><span style="color: #e74c3c; font-size: 18px; font-weight: bold;">$196,590.00</span></td></tr>
+                <tr><td><strong>合约:</strong></td><td>ETH-26JUN26-2000-P</td></tr>
+                <tr><td><strong>价格:</strong></td><td>Unknown</td></tr>
+                <tr><td><strong>IV:</strong></td><td>75.21%</td></tr>
+            </table>
+            <h4>希腊字母:</h4>
+            
+        <div class="greeks">
+            <div class="greek-item">
+                <strong>Delta</strong><br>
+                N/A
+            </div>
+            <div class="greek-item">
+                <strong>Gamma</strong><br>
+                N/A
+            </div>
+            <div class="greek-item">
+                <strong>Vega</strong><br>
+                N/A
+            </div>
+            <div class="greek-item">
+                <strong>Theta</strong><br>
+                N/A
+            </div>
+            <div class="greek-item">
+                <strong>Rho</strong><br>
+                N/A
+            </div>
+        </div>
+        
+        </div>
+        
+                </div>
+
+                <div style="margin: 20px 0;">
+                    <h3>📦 按数量排名 Top 3</h3>
+        <div class="trade-card">
+            <div class="trade-header">#1 - 2025-12-11 02:00:16</div>
+            <table>
+                <tr><td><strong>交易策略:</strong></td><td>LONG ETH CALL SPREAD</td></tr>
+                <tr><td><strong>📦 合约数量:</strong></td><td><span style="color: #e74c3c; font-size: 18px; font-weight: bold;">2500.0x</span></td></tr>
+                <tr><td><strong>合约:</strong></td><td>ETH-26DEC25-3700-C</td></tr>
+                <tr><td><strong>价格:</strong></td><td>Unknown</td></tr>
+                <tr><td><strong>IV:</strong></td><td>67.15%</td></tr>
+            </table>
+            <h4>希腊字母:</h4>
+            
+        <div class="greeks">
+            <div class="greek-item">
+                <strong>Delta</strong><br>
+                N/A
+            </div>
+            <div class="greek-item">
+                <strong>Gamma</strong><br>
+                N/A
+            </div>
+            <div class="greek-item">
+                <strong>Vega</strong><br>
+                N/A
+            </div>
+            <div class="greek-item">
+                <strong>Theta</strong><br>
+                N/A
+            </div>
+            <div class="greek-item">
+                <strong>Rho</strong><br>
+                N/A
+            </div>
+        </div>
+        
+        </div>
+        
+        <div class="trade-card">
+            <div class="trade-header">#2 - 2025-12-11 11:12:35</div>
+            <table>
+                <tr><td><strong>交易策略:</strong></td><td>LONG ETH PUT SPREAD</td></tr>
+                <tr><td><strong>📦 合约数量:</strong></td><td><span style="color: #e74c3c; font-size: 18px; font-weight: bold;">2000.0x</span></td></tr>
+                <tr><td><strong>合约:</strong></td><td>ETH-13DEC25-3100-P</td></tr>
+                <tr><td><strong>价格:</strong></td><td>Unknown</td></tr>
+                <tr><td><strong>IV:</strong></td><td>78.1%</td></tr>
+            </table>
+            <h4>希腊字母:</h4>
+            
+        <div class="greeks">
+            <div class="greek-item">
+                <strong>Delta</strong><br>
+                N/A
+            </div>
+            <div class="greek-item">
+                <strong>Gamma</strong><br>
+                N/A
+            </div>
+            <div class="greek-item">
+                <strong>Vega</strong><br>
+                N/A
+            </div>
+            <div class="greek-item">
+                <strong>Theta</strong><br>
+                N/A
+            </div>
+            <div class="greek-item">
+                <strong>Rho</strong><br>
+                N/A
+            </div>
+        </div>
+        
+        </div>
+        
+        <div class="trade-card">
+            <div class="trade-header">#3 - 2025-12-11 08:51:40</div>
+            <table>
+                <tr><td><strong>交易策略:</strong></td><td>LONG ETH PUT SPREAD</td></tr>
+                <tr><td><strong>📦 合约数量:</strong></td><td><span style="color: #e74c3c; font-size: 18px; font-weight: bold;">1500.0x</span></td></tr>
+                <tr><td><strong>合约:</strong></td><td>ETH-14DEC25-3200-P</td></tr>
+                <tr><td><strong>价格:</strong></td><td>Unknown</td></tr>
+                <tr><td><strong>IV:</strong></td><td>63.85%</td></tr>
+            </table>
+            <h4>希腊字母:</h4>
+            
+        <div class="greeks">
+            <div class="greek-item">
+                <strong>Delta</strong><br>
+                N/A
+            </div>
+            <div class="greek-item">
+                <strong>Gamma</strong><br>
+                N/A
+            </div>
+            <div class="greek-item">
+                <strong>Vega</strong><br>
+                N/A
+            </div>
+            <div class="greek-item">
+                <strong>Theta</strong><br>
+                N/A
+            </div>
+            <div class="greek-item">
+                <strong>Rho</strong><br>
+                N/A
+            </div>
+        </div>
+        
+        </div>
+        
+                </div>
+            </div>
+    
+        </div>
+
+        <hr>
+        <p style="text-align: center; color: #7f8c8d; font-size: 12px;">
+            此报告由 Telegram 数据采集系统自动生成<br>
+            生成时间: 2025-12-11T21:14:46.169680+08:00
+        </p>
+    </body>
+    </html>
+    

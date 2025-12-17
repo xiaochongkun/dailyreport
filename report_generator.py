@@ -6,8 +6,11 @@
 from datetime import datetime, timedelta
 import pytz
 import json
+import sqlite3
+import time
 import config
 from database import get_session, get_messages_by_date_range, get_block_trades_by_date_range, DailyReport
+from filelock import FileLock, Timeout
 
 
 def normalize_block_trades(block_trades, filter_non_options=False):
@@ -53,6 +56,7 @@ def normalize_block_trades(block_trades, filter_non_options=False):
                 'date': date_str,  # 兼容 legacy template
                 'raw_text': trade.text or '',
                 'strategy': parsed.get('strategy', 'Unknown'),
+                'strategy_title': parsed.get('strategy_title', 'Unknown'),  # ⚠️ 新增
                 'contract': parsed.get('contract', 'Unknown'),
                 'price': parsed.get('price', 'Unknown'),
                 'iv': parsed.get('iv', 'Unknown'),
@@ -61,6 +65,8 @@ def normalize_block_trades(block_trades, filter_non_options=False):
                 'premium': parsed.get('premium', 'Unknown'),
                 'instrument_type': parsed.get('instrument_type', 'Unknown'),
                 'greeks': parsed.get('greeks', {}),
+                'options_legs': parsed.get('options_legs', []),  # ⚠️ 新增
+                'non_options_legs': parsed.get('non_options_legs', []),  # ⚠️ 新增
                 'msg_id': getattr(trade, 'message_id', 'Unknown'),  # 添加 message_id
                 'side': parsed.get('side', 'Unknown'),  # 添加 side
                 'spot_price': parsed.get('spot_price', 'N/A')  # 添加 spot_price
@@ -109,8 +115,8 @@ def build_daily_report_data(messages, block_trades, start_date, end_date, top_li
     Returns:
         report_data: dict
     """
-    # 提取现货价格
-    spot_prices = extract_spot_prices(messages)
+    # 提取现货价格（传递时间范围）
+    spot_prices = extract_spot_prices(messages, start_date, end_date)
 
     # 标准化交易（全量，用于展示所有交易）
     normalized_all = normalize_block_trades(block_trades, filter_non_options=False)
@@ -151,13 +157,18 @@ def build_daily_report_data(messages, block_trades, start_date, end_date, top_li
     btc_trades = [t for t in normalized_options if t['asset'] == 'BTC']
     eth_trades = [t for t in normalized_options if t['asset'] == 'ETH']
 
+    # ⚠️ 按数量排序：只要 volume > 0 即可（期权张数）
     btc_by_volume = sorted(btc_trades, key=lambda x: x['volume'], reverse=True)[:top_limit]
     eth_by_volume = sorted(eth_trades, key=lambda x: x['volume'], reverse=True)[:top_limit]
 
-    btc_by_amount = sorted(btc_trades, key=lambda x: x['amount_usd'], reverse=True)[:top_limit]
-    eth_by_amount = sorted(eth_trades, key=lambda x: x['amount_usd'], reverse=True)[:top_limit]
+    # ⚠️ 按金额排序：必须基于 amount_usd != null 且 > 0 的集合（期权腿总权利金）
+    btc_trades_with_amount = [t for t in btc_trades if t.get('amount_usd', 0) > 0]
+    eth_trades_with_amount = [t for t in eth_trades if t.get('amount_usd', 0) > 0]
 
-    # 添加 rank
+    btc_by_amount = sorted(btc_trades_with_amount, key=lambda x: x['amount_usd'], reverse=True)[:top_limit]
+    eth_by_amount = sorted(eth_trades_with_amount, key=lambda x: x['amount_usd'], reverse=True)[:top_limit]
+
+    # 添加 rank（从1开始递增）
     for i, t in enumerate(btc_by_volume, 1):
         t['rank'] = i
     for i, t in enumerate(eth_by_volume, 1):
@@ -166,6 +177,17 @@ def build_daily_report_data(messages, block_trades, start_date, end_date, top_li
         t['rank'] = i
     for i, t in enumerate(eth_by_amount, 1):
         t['rank'] = i
+
+    # ⚠️ 打印 Top3 统计日志（用于验证）
+    for t in btc_by_volume[:3]:
+        legs_opts = len(t.get('options_legs', []))
+        legs_non_opts = len(t.get('non_options_legs', []))
+        print(f"[TOP] rank={t['rank']} asset=BTC sort=volume legs_options={legs_opts} legs_non_options={legs_non_opts} volume={t['volume']} amount_usd={t.get('amount_usd', 0):.2f}")
+
+    for t in btc_by_amount[:3]:
+        legs_opts = len(t.get('options_legs', []))
+        legs_non_opts = len(t.get('non_options_legs', []))
+        print(f"[TOP] rank={t['rank']} asset=BTC sort=amount legs_options={legs_opts} legs_non_options={legs_non_opts} volume={t['volume']} amount_usd={t.get('amount_usd', 0):.2f}")
 
     top_trades = {
         'btc_by_amount': btc_by_amount,
@@ -388,59 +410,97 @@ async def generate_daily_report(target_date=None):
         # 5. 渲染 HTML
         html_content = render_report_html(report_data)
 
-        # 6. 保存报告到数据库
+        # 6. 保存报告到数据库（加锁防止并发写入）
         report_date = start_date.strftime('%Y-%m-%d')
         print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [GENERATE_REPORT] start report_date={report_date}")
 
-        # 检查是否已存在该日期的报告
-        existing_report = session.query(DailyReport).filter_by(report_date=report_date).first()
-
-        if existing_report:
-            # 更新现有报告
-            existing_report.start_time = start_date
-            existing_report.end_time = end_date
-            existing_report.total_messages = report_data['counts']['total_messages']
-            existing_report.total_block_trades = report_data['counts']['block_trades']
-            existing_report.btc_trade_count = report_data['counts']['btc_count']
-            existing_report.btc_total_volume = int(report_data['volume_stats']['btc_volume'])
-            existing_report.eth_trade_count = report_data['counts']['eth_count']
-            existing_report.eth_total_volume = int(report_data['volume_stats']['eth_volume'])
-            existing_report.btc_spot_price = report_data['spot_prices']['btc']
-            existing_report.eth_spot_price = report_data['spot_prices']['eth']
-            existing_report.report_data = json.dumps(report_data, ensure_ascii=False)
-            existing_report.html_content = html_content
-            existing_report.is_sent = False
-            existing_report.sent_at = None
-            existing_report.created_at = datetime.utcnow()
-            print(f"✓ 更新已存在的报告: {report_date}")
-        else:
-            # 创建新报告
-            new_report = DailyReport(
-                report_date=report_date,
-                start_time=start_date,
-                end_time=end_date,
-                total_messages=report_data['counts']['total_messages'],
-                total_block_trades=report_data['counts']['block_trades'],
-                btc_trade_count=report_data['counts']['btc_count'],
-                btc_total_volume=int(report_data['volume_stats']['btc_volume']),
-                eth_trade_count=report_data['counts']['eth_count'],
-                eth_total_volume=int(report_data['volume_stats']['eth_volume']),
-                btc_spot_price=report_data['spot_prices']['btc'],
-                eth_spot_price=report_data['spot_prices']['eth'],
-                report_data=json.dumps(report_data, ensure_ascii=False),
-                html_content=html_content,
-                is_sent=False
-            )
-            session.add(new_report)
-            print(f"✓ 创建新报告: {report_date}")
+        # 使用文件锁确保串行写入
+        lock_path = '/tmp/dailyreport.lock'
+        lock = FileLock(lock_path, timeout=10)
 
         try:
-            session.flush()  # 先检测问题
-            session.commit()
-        except Exception as commit_err:
-            print(f"✗ 保存报告失败: {commit_err}")
-            session.rollback()
-            raise  # generate 失败要抛出
+            with lock:
+                print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [DB] lock_acquired path={lock_path}")
+
+                # 检查是否已存在该日期的报告
+                existing_report = session.query(DailyReport).filter_by(report_date=report_date).first()
+
+                if existing_report:
+                    # 更新现有报告
+                    existing_report.start_time = start_date
+                    existing_report.end_time = end_date
+                    existing_report.total_messages = report_data['counts']['total_messages']
+                    existing_report.total_block_trades = report_data['counts']['block_trades']
+                    existing_report.btc_trade_count = report_data['counts']['btc_count']
+                    existing_report.btc_total_volume = int(report_data['volume_stats']['btc_volume'])
+                    existing_report.eth_trade_count = report_data['counts']['eth_count']
+                    existing_report.eth_total_volume = int(report_data['volume_stats']['eth_volume'])
+                    # 处理 None 值：转换为字符串
+                    existing_report.btc_spot_price = str(report_data['spot_prices']['btc']) if report_data['spot_prices']['btc'] is not None else None
+                    existing_report.eth_spot_price = str(report_data['spot_prices']['eth']) if report_data['spot_prices']['eth'] is not None else None
+                    existing_report.report_data = json.dumps(report_data, ensure_ascii=False)
+                    existing_report.html_content = html_content
+                    existing_report.is_sent = False
+                    existing_report.sent_at = None
+                    existing_report.created_at = datetime.utcnow()
+                    print(f"✓ 更新已存在的报告: {report_date}")
+                else:
+                    # 创建新报告
+                    new_report = DailyReport(
+                        report_date=report_date,
+                        start_time=start_date,
+                        end_time=end_date,
+                        total_messages=report_data['counts']['total_messages'],
+                        total_block_trades=report_data['counts']['block_trades'],
+                        btc_trade_count=report_data['counts']['btc_count'],
+                        btc_total_volume=int(report_data['volume_stats']['btc_volume']),
+                        eth_trade_count=report_data['counts']['eth_count'],
+                        eth_total_volume=int(report_data['volume_stats']['eth_volume']),
+                        # 处理 None 值：转换为字符串
+                        btc_spot_price=str(report_data['spot_prices']['btc']) if report_data['spot_prices']['btc'] is not None else None,
+                        eth_spot_price=str(report_data['spot_prices']['eth']) if report_data['spot_prices']['eth'] is not None else None,
+                        report_data=json.dumps(report_data, ensure_ascii=False),
+                        html_content=html_content,
+                        is_sent=False
+                    )
+                    session.add(new_report)
+                    print(f"✓ 创建新报告: {report_date}")
+
+                # 提交事务，带重试机制
+                max_retries = 3
+                retry_delay = 1.0
+
+                for retry in range(max_retries):
+                    try:
+                        session.flush()  # 先检测问题
+                        session.commit()
+                        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [DB] commit_success report_date={report_date}")
+                        break  # 成功则退出重试循环
+                    except sqlite3.OperationalError as op_err:
+                        if 'database is locked' in str(op_err):
+                            if retry < max_retries - 1:
+                                print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [DB] commit_retry attempt={retry+1}/{max_retries} delay={retry_delay}s err='{op_err}'")
+                                session.rollback()
+                                time.sleep(retry_delay)
+                                retry_delay *= 2  # 指数退避
+                            else:
+                                print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [DB] commit_failed max_retries_exceeded err='{op_err}'")
+                                session.rollback()
+                                raise
+                        else:
+                            print(f"✗ 保存报告失败（非锁错误）: {op_err}")
+                            session.rollback()
+                            raise
+                    except Exception as commit_err:
+                        print(f"✗ 保存报告失败: {commit_err}")
+                        session.rollback()
+                        raise  # generate 失败要抛出
+
+                print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [DB] lock_released path={lock_path}")
+
+        except Timeout:
+            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [DB] lock_timeout err='Failed to acquire lock within 10s'")
+            raise
 
         print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [GENERATE_REPORT] end report_date={report_date} total_messages={report_data['counts']['total_messages']} total_block_trades={report_data['counts']['block_trades']}")
 
@@ -460,65 +520,187 @@ async def generate_daily_report(target_date=None):
         raise
 
 
-def extract_spot_prices(messages):
+def extract_spot_prices(messages, start_date, end_date):
     """
     从消息列表中提取最新的 BTC 和 ETH 现货价格
 
-    ⚠️ 修正：只从带"🏷️ Spot Prices"标签的专门播报消息提取
-    不再从策略标题中的"(🐮 Spot 🐻 Vol)"误匹配数量
+    ⚠️ 修正：优先级顺序
+    1) 在统计窗口 start_date~end_date 内查找最后一条"🏷️ Spot Prices"播报
+    2) 若窗口内没有：回退到窗口开始前最近一条"🏷️ Spot Prices"播报
+    3) 若仍没有：从交易消息的 **Ref**: $xxxxx 推断（取窗口内最新）
+    4) 若都没有：返回 None
 
     Args:
         messages: 消息列表 (Message ORM 对象)
+        start_date: 统计窗口开始时间
+        end_date: 统计窗口结束时间
 
     Returns:
-        {'btc': float, 'eth': float}
+        {
+            'btc': float or None,
+            'eth': float or None,
+            'spot_source': 'spot_prices_tag' | 'spot_prices_fallback' | 'ref_fallback' | 'missing',
+            'spot_ts': datetime or None,
+            'source_msg_id': int or None
+        }
     """
     import re
+    import pytz
 
-    btc_price = None
-    eth_price = None
+    def parse_spot_message(text):
+        """解析单条 Spot Prices 消息"""
+        btc_price = None
+        eth_price = None
 
-    # 按时间倒序遍历，优先获取最新价格
-    for message in reversed(messages):
-        text = message.text or ''
+        # 提取 BTC 价格
+        btc_match = re.search(r'BTC[^\d$]*\$?\s*([0-9,]+\.?[0-9]*)', text, re.IGNORECASE)
+        if btc_match:
+            try:
+                price_val = float(btc_match.group(1).replace(',', ''))
+                # 合理性检查：现货价格应该在 1000-200000 范围
+                if 1000 < price_val < 200000:
+                    btc_price = price_val
+            except:
+                pass
 
-        # ✅ 严格过滤：只处理包含 "🏷️ Spot Prices" 的播报消息
-        if '🏷️ Spot Prices' not in text and '🏷️Spot Prices' not in text:
-            continue
+        # 提取 ETH 价格
+        eth_match = re.search(r'ETH[^\d$]*\$?\s*([0-9,]+\.?[0-9]*)', text, re.IGNORECASE)
+        if eth_match:
+            try:
+                price_val = float(eth_match.group(1).replace(',', ''))
+                # 合理性检查：现货价格应该在 100-10000 范围
+                if 100 < price_val < 10000:
+                    eth_price = price_val
+            except:
+                pass
 
-        # 提取 BTC 价格 - 支持多种格式
-        if btc_price is None:
-            # 支持：BTC $102,992.00 / BTC 102992 / BTC price: $102992
-            btc_match = re.search(r'BTC[^\d$]*\$?\s*([0-9,]+\.?[0-9]*)', text, re.IGNORECASE)
-            if btc_match:
-                try:
-                    price_val = float(btc_match.group(1).replace(',', ''))
-                    # 合理性检查：现货价格应该在 1000-200000 范围
-                    if 1000 < price_val < 200000:
-                        btc_price = price_val
-                except:
-                    pass
+        return btc_price, eth_price
 
-        # 提取 ETH 价格 - 支持多种格式
-        if eth_price is None:
-            # 支持：ETH $3,423.82 / ETH 3423 / ETH price: $3423
-            eth_match = re.search(r'ETH[^\d$]*\$?\s*([0-9,]+\.?[0-9]*)', text, re.IGNORECASE)
-            if eth_match:
-                try:
-                    price_val = float(eth_match.group(1).replace(',', ''))
-                    # 合理性检查：现货价格应该在 100-10000 范围
-                    if 100 < price_val < 10000:
-                        eth_price = price_val
-                except:
-                    pass
+    def ensure_aware(dt, target_tz):
+        """确保 datetime 有时区信息"""
+        if dt.tzinfo is None:
+            return pytz.utc.localize(dt).astimezone(target_tz)
+        else:
+            return dt.astimezone(target_tz)
 
-        # 两个价格都找到后退出
-        if btc_price and eth_price:
-            break
+    # 获取目标时区
+    target_tz = start_date.tzinfo if start_date.tzinfo else pytz.timezone(config.REPORT_TIMEZONE)
 
+    # 筛选所有 Spot Prices 消息
+    spot_messages = [msg for msg in messages
+                     if ('🏷️ Spot Prices' in (msg.text or '') or '🏷️Spot Prices' in (msg.text or ''))]
+
+    # 步骤1：在窗口内查找最后一条 Spot Prices
+    in_window_msgs = []
+    for msg in spot_messages:
+        msg_date_aware = ensure_aware(msg.date, target_tz)
+        if start_date <= msg_date_aware <= end_date:
+            in_window_msgs.append(msg)
+
+    if in_window_msgs:
+        latest_msg = sorted(in_window_msgs, key=lambda x: x.date, reverse=True)[0]
+        btc_price, eth_price = parse_spot_message(latest_msg.text or '')
+
+        print(f"[SPOT] source=spot_prices_tag msg_id={latest_msg.message_id} btc={btc_price} eth={eth_price} spot_ts={latest_msg.date.isoformat()}")
+        return {
+            'btc': btc_price,
+            'eth': eth_price,
+            'spot_source': 'spot_prices_tag',
+            'spot_ts': latest_msg.date.isoformat() if latest_msg.date else None,  # ⚠️ 修正：转为ISO字符串
+            'source_msg_id': latest_msg.message_id
+        }
+
+    # 步骤2：回退到窗口开始前最近一条 Spot Prices
+    before_window_msgs = []
+    for msg in spot_messages:
+        msg_date_aware = ensure_aware(msg.date, target_tz)
+        if msg_date_aware < start_date:
+            before_window_msgs.append(msg)
+
+    if before_window_msgs:
+        latest_msg = sorted(before_window_msgs, key=lambda x: x.date, reverse=True)[0]
+        btc_price, eth_price = parse_spot_message(latest_msg.text or '')
+
+        print(f"[SPOT] source=spot_prices_fallback msg_id={latest_msg.message_id} btc={btc_price} eth={eth_price} spot_ts={latest_msg.date.isoformat()}")
+        return {
+            'btc': btc_price,
+            'eth': eth_price,
+            'spot_source': 'spot_prices_fallback',
+            'spot_ts': latest_msg.date.isoformat() if latest_msg.date else None,  # ⚠️ 修正：转为ISO字符串
+            'source_msg_id': latest_msg.message_id
+        }
+
+    # 步骤3：从交易消息的 Ref 推断（窗口内最新）
+    ref_messages = []
+    for msg in messages:
+        text = msg.text or ''
+        # 提取 Ref 价格和资产类型
+        ref_match = re.search(r'(?:Ref|REF)[\*:\s：]{1,5}\$([0-9,.]+)', text, re.IGNORECASE)
+        if ref_match:
+            try:
+                ref_val = float(ref_match.group(1).replace(',', ''))
+                # 判断资产类型
+                asset = None
+                if 'BTC' in text.upper():
+                    asset = 'BTC'
+                elif 'ETH' in text.upper():
+                    asset = 'ETH'
+
+                if asset:
+                    msg_date_aware = ensure_aware(msg.date, target_tz)
+                    if start_date <= msg_date_aware <= end_date:
+                        ref_messages.append({
+                            'msg': msg,
+                            'asset': asset,
+                            'ref_price': ref_val,
+                            'date': msg.date
+                        })
+            except:
+                pass
+
+    if ref_messages:
+        # 按时间倒序排序
+        ref_messages_sorted = sorted(ref_messages, key=lambda x: x['date'], reverse=True)
+
+        # 提取最新的 BTC 和 ETH Ref
+        btc_price = None
+        eth_price = None
+        latest_btc_msg = None
+        latest_eth_msg = None
+
+        for ref_msg in ref_messages_sorted:
+            if ref_msg['asset'] == 'BTC' and btc_price is None:
+                btc_price = ref_msg['ref_price']
+                latest_btc_msg = ref_msg['msg']
+            elif ref_msg['asset'] == 'ETH' and eth_price is None:
+                eth_price = ref_msg['ref_price']
+                latest_eth_msg = ref_msg['msg']
+
+            # 如果两者都找到了，退出
+            if btc_price is not None and eth_price is not None:
+                break
+
+        # 使用最新的一条作为代表（取BTC优先，ETH次之）
+        latest_msg = latest_btc_msg if latest_btc_msg else latest_eth_msg
+
+        if latest_msg:
+            print(f"[SPOT] source=ref_fallback msg_id={latest_msg.message_id} btc={btc_price} eth={eth_price} spot_ts={latest_msg.date.isoformat()}")
+            return {
+                'btc': btc_price,
+                'eth': eth_price,
+                'spot_source': 'ref_fallback',
+                'spot_ts': latest_msg.date.isoformat() if latest_msg.date else None,  # ⚠️ 修正：转为ISO字符串
+                'source_msg_id': latest_msg.message_id
+            }
+
+    # 步骤4：都没有
+    print(f"[SPOT] source=missing reason=no_spot_message_and_no_ref btc=None eth=None spot_ts=None")
     return {
-        'btc': btc_price or 0.0,
-        'eth': eth_price or 0.0
+        'btc': None,
+        'eth': None,
+        'spot_source': 'missing',
+        'spot_ts': None,
+        'source_msg_id': None
     }
 
 
@@ -638,11 +820,12 @@ def parse_block_trade_message(text):
     result = {
         'asset': 'Unknown',      # BTC or ETH
         'strategy': 'Unknown',
-        'volume': 0.0,           # 合约数量
-        'amount_usd': 0.0,       # 美元金额
+        'strategy_title': 'Unknown',  # ⚠️ 新增：完整策略标题（从消息标题行提取）
+        'volume': 0.0,           # 合约数量（总和，用于排序）
+        'amount_usd': 0.0,       # 美元金额（期权腿总权利金）
         'exchange': 'Unknown',
-        'contract': 'Unknown',
-        'price': 'Unknown',
+        'contract': 'Unknown',   # 单腿时显示合约名，多腿时显示"合约（多腿）"
+        'price': 'Unknown',      # 单腿每张价格（币本位+USD）
         'iv': 'Unknown',
         'ask': 'Unknown',
         'mark': 'Unknown',
@@ -656,7 +839,10 @@ def parse_block_trade_message(text):
             'vega': None,
             'theta': None,
             'rho': None
-        }
+        },
+        # ⚠️ 新增：多腿结构
+        'options_legs': [],       # 期权腿列表：[{side, volume, contract, price_native, price_usd, iv, ...}, ...]
+        'non_options_legs': []    # 非期权腿（PERPETUAL/FUTURES/SPOT）：[{side, volume, contract, price, ...}, ...]
     }
 
     if not text:
@@ -864,19 +1050,218 @@ def parse_block_trade_message(text):
         except:
             pass
 
-    # 8. 提取价格信息 (简化版)
-    price_match = re.search(r'at\s+([\d.]+)\s*₿\s*\(\$([^)]+)\)', text)
-    if price_match:
-        result['price'] = f"{price_match.group(1)} ₿ (${price_match.group(2)})"
+    # 8. 提取价格信息（支持 BTC ₿ 和 ETH Ξ）
+    price_native = None
+    price_usd = None
+    price_inferred = False
+
+    # 尝试从 "at X ₿ ($Y)" 格式提取 BTC 价格
+    btc_price_match = re.search(r'at\s+([\d,.]+)\s*₿\s*\(\$([0-9,.]+[KMB]?)\)', text)
+    if btc_price_match:
+        price_native_val = btc_price_match.group(1).replace(',', '')
+        price_usd_val = btc_price_match.group(2).replace(',', '')
+        price_native = f"{price_native_val} ₿"
+        price_usd = f"${price_usd_val}"
+
+    # 尝试从 "at X Ξ ($Y)" 格式提取 ETH 价格
+    eth_price_match = re.search(r'at\s+([\d,.]+)\s*Ξ\s*\(\$([0-9,.]+[KMB]?)\)', text)
+    if eth_price_match:
+        price_native_val = eth_price_match.group(1).replace(',', '')
+        price_usd_val = eth_price_match.group(2).replace(',', '')
+        price_native = f"{price_native_val} Ξ"
+        price_usd = f"${price_usd_val}"
+
+    # 如果找到了价格，保存到 result
+    if price_native and price_usd:
+        result['price_native'] = price_native
+        result['price_usd'] = price_usd
+        result['price'] = f"{price_native} ({price_usd})"
+        result['price_inferred'] = price_inferred
+    else:
+        # 尝试反推：如果有 Total 和 volume
+        # 辅助函数：解析金额（支持 K/M/B 后缀）
+        def parse_amount(amt_str):
+            amt_str = amt_str.replace(',', '')
+            multiplier = 1
+            if amt_str.endswith('K'):
+                multiplier = 1000
+                amt_str = amt_str[:-1]
+            elif amt_str.endswith('M'):
+                multiplier = 1000000
+                amt_str = amt_str[:-1]
+            elif amt_str.endswith('B'):
+                multiplier = 1000000000
+                amt_str = amt_str[:-1]
+            try:
+                return float(amt_str) * multiplier
+            except:
+                return 0.0
+
+        # 从 Total Bought/Sold: X ₿ ($Y) 提取
+        total_btc_match = re.search(r'Total (?:Bought|Sold):\s*([\d,.]+)\s*₿\s*\(\$([0-9,.]+[KMB]?)\)', text)
+        total_eth_match = re.search(r'Total (?:Bought|Sold):\s*([\d,.]+)\s*Ξ\s*\(\$([0-9,.]+[KMB]?)\)', text)
+
+        if total_btc_match and result['volume'] > 0:
+            total_native = float(total_btc_match.group(1).replace(',', ''))
+            price_native = f"{total_native / result['volume']:.4f} ₿"
+            total_usd = parse_amount(total_btc_match.group(2))
+            price_usd = f"${total_usd / result['volume']:,.2f}"
+            result['price_native'] = price_native
+            result['price_usd'] = price_usd
+            result['price'] = f"{price_native} ({price_usd})"
+            result['price_inferred'] = True
+        elif total_eth_match and result['volume'] > 0:
+            total_native = float(total_eth_match.group(1).replace(',', ''))
+            price_native = f"{total_native / result['volume']:.4f} Ξ"
+            total_usd = parse_amount(total_eth_match.group(2))
+            price_usd = f"${total_usd / result['volume']:,.2f}"
+            result['price_native'] = price_native
+            result['price_usd'] = price_usd
+            result['price'] = f"{price_native} ({price_usd})"
+            result['price_inferred'] = True
 
     # 9. 提取现货参考价格 (Ref: $105234.56)
-    spot_match = re.search(r'(?:Ref|REF)[:\s]+\$([0-9,.]+)', text, re.IGNORECASE)
+    # 支持多种格式：Ref: $123 / **Ref**: $123 / Ref**: $123 / Ref：$123（中文冒号）
+    spot_match = re.search(r'(?:Ref|REF)[\*:\s：]{1,5}\$([0-9,.]+)', text, re.IGNORECASE)
     if spot_match:
         try:
             spot_val = float(spot_match.group(1).replace(',', ''))
             result['spot_price'] = f"${spot_val:,.2f}"
+            result['ref_price_usd'] = spot_val  # 新增：数值字段（用于日志和进一步处理）
         except:
             pass
+
+    # 10. 提取 strategy_title（完整策略标题）
+    # 从消息第一行提取，通常格式为 **✅OPENED ...** 或 **CUSTOM ... STRATEGY:**
+    title_match = re.search(r'\*\*(.*?)\*\*', text)
+    if title_match:
+        result['strategy_title'] = title_match.group(1).strip()
+
+    # 11. 提取 legs 结构（多腿交易）- 详细版本（用于单笔预警）
+    # ⚠️ 修正：逐行解析每条腿，提取完整信息
+    # 格式：🟢 Bought 225.0x 🔶 BTC-27FEB26-80000-P 📉 at 0.0427 ₿ ($3,716.30) Total Bought: 9.6075 ₿ ($836.17K), IV: 46.71%, Ref: $87032.71
+    #       bid: 0.042 (size: 78.0), mark: 0.0425, ask: 0.043 (size: 20.0)
+
+    def parse_amount_with_suffix(amt_str):
+        """解析金额（支持K/M/B后缀）"""
+        amt_str = amt_str.replace(',', '').replace('$', '').strip()
+        multiplier = 1
+        if amt_str.endswith('K'):
+            multiplier = 1000
+            amt_str = amt_str[:-1]
+        elif amt_str.endswith('M'):
+            multiplier = 1000000
+            amt_str = amt_str[:-1]
+        elif amt_str.endswith('B'):
+            multiplier = 1000000000
+            amt_str = amt_str[:-1]
+        try:
+            return float(amt_str) * multiplier
+        except:
+            return None
+
+    # 分行处理
+    lines = text.split('\n')
+    current_leg = None
+
+    for line in lines:
+        # 检查是否是新的腿（Bought/Sold 开头）
+        leg_match = re.search(r'(Bought|Sold)\s+([\d.]+)x\s+.*?((BTC|ETH)-[\dA-Z-]+)', line, re.IGNORECASE)
+
+        if leg_match:
+            # 如果有未完成的腿，先保存
+            if current_leg:
+                # 根据合约名判断instrument_type
+                contract_name = current_leg['contract']
+                if 'PERPETUAL' in contract_name.upper() or 'PERP' in contract_name.upper():
+                    current_leg['instrument_type'] = 'PERPETUAL'
+                    result['non_options_legs'].append(current_leg)
+                elif 'FUTURES' in contract_name.upper() or 'FUT' in contract_name.upper():
+                    current_leg['instrument_type'] = 'FUTURES'
+                    result['non_options_legs'].append(current_leg)
+                elif re.search(r'-\d+-[PC]$', contract_name):  # 以 -数字-P/C 结尾
+                    current_leg['instrument_type'] = 'OPTIONS'
+                    result['options_legs'].append(current_leg)
+
+            # 开始新的腿
+            side_str = leg_match.group(1)  # Bought / Sold
+            volume_val = float(leg_match.group(2))
+            contract_name = leg_match.group(3)
+
+            current_leg = {
+                'contract': contract_name,
+                'side': 'LONG' if side_str.upper() == 'BOUGHT' else 'SHORT',
+                'volume': volume_val,
+                'price_btc': None,
+                'price_usd': None,
+                'total_btc': None,
+                'total_usd': None,
+                'iv': None,
+                'ref_spot_usd': None,
+                'bid': None,
+                'bid_size': None,
+                'mark': None,
+                'ask': None,
+                'ask_size': None
+            }
+
+            # 提取价格：at 0.0427 ₿ ($3,716.30)
+            price_match = re.search(r'at\s+([\d.]+)\s*₿\s*\(\$([0-9,.]+)\)', line)
+            if price_match:
+                current_leg['price_btc'] = float(price_match.group(1))
+                current_leg['price_usd'] = parse_amount_with_suffix(price_match.group(2))
+
+            # 提取Total：Total Bought: 9.6075 ₿ ($836.17K)
+            total_match = re.search(r'Total\s+(?:Bought|Sold):\s+([\d.]+)\s*₿\s*\(\$([0-9,.KMB]+)\)', line)
+            if total_match:
+                current_leg['total_btc'] = float(total_match.group(1))
+                current_leg['total_usd'] = parse_amount_with_suffix(total_match.group(2))
+
+            # 提取IV：IV: 46.71% 或 **IV**: 46.71%
+            iv_match = re.search(r'\*\*IV\*\*:\s*([\d.]+)%|IV:\s*([\d.]+)%', line)
+            if iv_match:
+                current_leg['iv'] = float(iv_match.group(1) or iv_match.group(2))
+
+            # 提取Ref：Ref: $87032.71 或 **Ref**: $87032.71
+            ref_match = re.search(r'\*\*Ref\*\*:\s*\$([0-9,.]+)|Ref:\s*\$([0-9,.]+)', line)
+            if ref_match:
+                current_leg['ref_spot_usd'] = float((ref_match.group(1) or ref_match.group(2)).replace(',', ''))
+
+        # 检查是否是quote行（bid/mark/ask）
+        elif current_leg and re.search(r'bid.*mark.*ask', line, re.IGNORECASE):
+            # bid: 0.042 (size: 78.0), mark: 0.0425, ask: 0.043 (size: 20.0)
+            bid_match = re.search(r'bid:\s*([\d.]+)(?:\s*\(size:\s*([\d.]+)\))?', line, re.IGNORECASE)
+            if bid_match:
+                current_leg['bid'] = float(bid_match.group(1))
+                if bid_match.group(2):
+                    current_leg['bid_size'] = float(bid_match.group(2))
+
+            mark_match = re.search(r'mark:\s*([\d.]+)', line, re.IGNORECASE)
+            if mark_match:
+                current_leg['mark'] = float(mark_match.group(1))
+
+            ask_match = re.search(r'ask:\s*([\d.]+)(?:\s*\(size:\s*([\d.]+)\))?', line, re.IGNORECASE)
+            if ask_match:
+                current_leg['ask'] = float(ask_match.group(1))
+                if ask_match.group(2):
+                    current_leg['ask_size'] = float(ask_match.group(2))
+
+    # 保存最后一条腿
+    if current_leg:
+        contract_name = current_leg['contract']
+        if 'PERPETUAL' in contract_name.upper() or 'PERP' in contract_name.upper():
+            current_leg['instrument_type'] = 'PERPETUAL'
+            result['non_options_legs'].append(current_leg)
+        elif 'FUTURES' in contract_name.upper() or 'FUT' in contract_name.upper():
+            current_leg['instrument_type'] = 'FUTURES'
+            result['non_options_legs'].append(current_leg)
+        elif re.search(r'-\d+-[PC]$', contract_name):
+            current_leg['instrument_type'] = 'OPTIONS'
+            result['options_legs'].append(current_leg)
+
+    # 如果有多个期权腿，更新 contract 显示
+    if len(result['options_legs']) > 1:
+        result['contract'] = f"合约（{len(result['options_legs'])}腿）"
 
     return result
 
@@ -884,6 +1269,11 @@ def parse_block_trade_message(text):
 def build_trade_card_html(trades, title, sort_type):
     """
     构建交易卡片 HTML
+
+    ⚠️ 修正：
+    - Greeks改为紧凑横排显示（单行）
+    - 支持多腿交易展示
+    - 使用strategy_title（如果有）
 
     Args:
         trades: 交易列表
@@ -899,50 +1289,69 @@ def build_trade_card_html(trades, title, sort_type):
     html = f"<h3>{title}</h3>"
 
     for trade in trades:
-        # 格式化希腊字母（处理 None 值）
+        # ⚠️ 修正：Greeks改为紧凑横排显示（单行，类似标签）
+        def format_greek(value):
+            """格式化希腊值（处理大数和None）"""
+            if value is None:
+                return 'N/A'
+            if abs(value) >= 1000:
+                return f"{value:,.0f}"  # 大数不显示小数
+            else:
+                return f"{value:.2f}"
+
+        greeks = trade.get('greeks', {})
         greeks_html = f"""
-        <div class="greeks">
-            <div class="greek-item">
-                <strong>Delta</strong><br>
-                {trade['greeks']['delta'] if trade['greeks']['delta'] is not None else 'N/A'}
-            </div>
-            <div class="greek-item">
-                <strong>Gamma</strong><br>
-                {trade['greeks']['gamma'] if trade['greeks']['gamma'] is not None else 'N/A'}
-            </div>
-            <div class="greek-item">
-                <strong>Vega</strong><br>
-                {trade['greeks']['vega'] if trade['greeks']['vega'] is not None else 'N/A'}
-            </div>
-            <div class="greek-item">
-                <strong>Theta</strong><br>
-                {trade['greeks']['theta'] if trade['greeks']['theta'] is not None else 'N/A'}
-            </div>
-            <div class="greek-item">
-                <strong>Rho</strong><br>
-                {trade['greeks']['rho'] if trade['greeks']['rho'] is not None else 'N/A'}
-            </div>
+        <div class="greeks-inline">
+            <span class="greek-tag">Δ: {format_greek(greeks.get('delta'))}</span>
+            <span class="greek-tag">Γ: {format_greek(greeks.get('gamma'))}</span>
+            <span class="greek-tag">ν: {format_greek(greeks.get('vega'))}</span>
+            <span class="greek-tag">Θ: {format_greek(greeks.get('theta'))}</span>
+            <span class="greek-tag">ρ: {format_greek(greeks.get('rho'))}</span>
         </div>
         """
 
-        # 排序指标高亮显示
+        # 排序指标高亮显示（注释：字段语义已明确）
         if sort_type == 'amount':
+            # amount_usd = 期权腿总权利金（USD）
             sort_value_html = f'<tr><td><strong>💰 交易金额:</strong></td><td><span style="color: #e74c3c; font-size: 18px; font-weight: bold;">${trade["amount_usd"]:,.2f}</span></td></tr>'
         else:  # volume
+            # volume = 期权张数（总和）
             sort_value_html = f'<tr><td><strong>📦 合约数量:</strong></td><td><span style="color: #e74c3c; font-size: 18px; font-weight: bold;">{trade["volume"]}x</span></td></tr>'
+
+        # ⚠️ 修正：使用strategy_title（如果有），否则fallback到strategy
+        strategy_display = trade.get('strategy_title', trade.get('strategy', 'Unknown'))
+
+        # ⚠️ 修正：支持多腿显示
+        options_legs = trade.get('options_legs', [])
+        non_options_legs = trade.get('non_options_legs', [])
+
+        # 合约字段：单腿显示合约名，多腿显示"合约（X腿）"并列出每条腿
+        if len(options_legs) > 1:
+            contract_html = f'<tr><td><strong>合约:</strong></td><td>{trade["contract"]}</td></tr>'
+            contract_html += '<tr><td colspan="2"><ul style="margin: 5px 0; padding-left: 20px; font-size: 12px;">'
+            for leg in options_legs:
+                contract_html += f'<li>{leg.get("side", "?")} {leg.get("volume", "?")}x {leg.get("contract", "Unknown")}</li>'
+            contract_html += '</ul></td></tr>'
+        else:
+            contract_html = f'<tr><td><strong>合约:</strong></td><td>{trade["contract"]}</td></tr>'
+
+        # price字段：单腿每张价格
+        price_display = trade.get('price', 'Unknown')
 
         html += f"""
         <div class="trade-card">
             <div class="trade-header">#{trade['rank']} - {trade['date']}</div>
             <table>
-                <tr><td><strong>交易策略:</strong></td><td>{trade['strategy']}</td></tr>
+                <tr><td><strong>交易策略:</strong></td><td>{strategy_display}</td></tr>
                 {sort_value_html}
-                <tr><td><strong>合约:</strong></td><td>{trade['contract']}</td></tr>
-                <tr><td><strong>价格:</strong></td><td>{trade['price']}</td></tr>
+                {contract_html}
+                <tr><td><strong>价格:</strong></td><td>{price_display}</td></tr>
                 <tr><td><strong>IV:</strong></td><td>{trade['iv']}</td></tr>
             </table>
-            <h4>希腊字母:</h4>
-            {greeks_html}
+            <div style="margin-top: 10px;">
+                <strong>希腊字母:</strong>
+                {greeks_html}
+            </div>
         </div>
         """
 
@@ -1049,6 +1458,21 @@ def build_daily_report_html(report_data):
             }}
             .greek-item {{
                 text-align: center;
+            }}
+            /* ⚠️ 新增：Greeks横排紧凑显示 */
+            .greeks-inline {{
+                display: flex;
+                flex-wrap: wrap;
+                gap: 8px;
+                margin-top: 5px;
+            }}
+            .greek-tag {{
+                display: inline-block;
+                padding: 4px 10px;
+                background: #ecf0f1;
+                border-radius: 3px;
+                font-size: 13px;
+                white-space: nowrap;
                 padding: 8px;
                 background: #ecf0f1;
                 border-radius: 3px;
@@ -1069,11 +1493,11 @@ def build_daily_report_html(report_data):
             <h2>💰 2. 当日关键市场指标</h2>
             <div class="stats">
                 <div class="stat-box">
-                    <div class="stat-number">${spot_prices['btc']:,.2f}</div>
+                    <div class="stat-number">{'${:,.2f}'.format(spot_prices['btc']) if spot_prices['btc'] is not None else 'N/A'}</div>
                     <div class="stat-label">BTC 现货价格</div>
                 </div>
                 <div class="stat-box">
-                    <div class="stat-number">${spot_prices['eth']:,.2f}</div>
+                    <div class="stat-number">{'${:,.2f}'.format(spot_prices['eth']) if spot_prices['eth'] is not None else 'N/A'}</div>
                     <div class="stat-label">ETH 现货价格</div>
                 </div>
             </div>
@@ -1173,6 +1597,100 @@ async def send_daily_report_email(html_content, report_data):
             f.write(html_content)
 
         print(f"  ✓ 报告已保存到: {output_file}")
+
+
+def send_existing_report_fast(report_date: str):
+    """
+    秒级测试发送：从 DB 读取已有日报并快速发送（用于模板调试）
+
+    优先级：
+    1. DailyReport 表有 html_content：直接发送（最快）
+    2. DailyReport 表有 report_data：渲染后发送
+    3. 不存在：生成一次后发送（兜底）
+
+    Args:
+        report_date: 报告日期 (格式: YYYY-MM-DD)
+
+    Returns:
+        True: 发送成功
+        False: 发送失败
+    """
+    from email_sender import send_html_email
+    import json
+
+    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [FAST_TEST] start date={report_date}")
+
+    session = get_session()
+    try:
+        # 步骤1：查询 DailyReport 表
+        report = session.query(DailyReport).filter_by(report_date=report_date).first()
+
+        if report:
+            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [FAST_TEST] db_report_found=true has_html={report.html_content is not None and len(report.html_content or '') > 0}")
+
+            # 情况1：已有 html_content（最快路径）
+            if report.html_content and len(report.html_content) > 0:
+                html_content = report.html_content
+                print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [FAST_TEST] mode=existing_html")
+
+            # 情况2：有 report_data，需要渲染
+            elif report.report_data:
+                print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [FAST_TEST] mode=render_from_report_data")
+                report_data = json.loads(report.report_data)
+                html_content = render_report_html(report_data)
+
+            else:
+                print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [FAST_TEST] error='report exists but no html_content or report_data'")
+                return False
+
+        else:
+            # 情况3：不存在，需要生成（兜底，只执行一次）
+            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [FAST_TEST] db_report_found=false mode=generated_then_send")
+            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [FAST_TEST] generating_report date={report_date}")
+
+            # 异步生成日报
+            import asyncio
+            report_data = asyncio.run(generate_daily_report(target_date=report_date))
+
+            # 重新查询获取生成的报告（注意：report_date 可能是 start_date 的日期）
+            # 先尝试原日期，再尝试前一天（因为窗口是 D-1 16:00 - D 16:00）
+            report = session.query(DailyReport).filter_by(report_date=report_date).first()
+            if not report:
+                # 尝试前一天
+                from datetime import date, timedelta
+                prev_date = (datetime.strptime(report_date, '%Y-%m-%d').date() - timedelta(days=1)).strftime('%Y-%m-%d')
+                report = session.query(DailyReport).filter_by(report_date=prev_date).first()
+                if report:
+                    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [FAST_TEST] using_prev_date actual_report_date={prev_date}")
+
+            if not report or not report.html_content:
+                print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [FAST_TEST] error='report generation failed or html_content empty'")
+                return False
+
+            html_content = report.html_content
+            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [FAST_TEST] generation_complete")
+
+        # 步骤2：发送邮件
+        subject = f"🧪 TEST Daily Report - {report_date} (From DB)"
+        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [FAST_TEST] sending_email subject='{subject}'")
+
+        success = send_html_email(subject, html_content)
+
+        if success:
+            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [FAST_TEST] email_sent=true")
+        else:
+            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [FAST_TEST] email_sent=false")
+
+        return success
+
+    except Exception as e:
+        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [FAST_TEST] error={e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+    finally:
+        session.close()
 
 
 async def send_pending_daily_reports(limit: int = None):
@@ -1293,10 +1811,31 @@ if __name__ == '__main__':
                        help='快速验收：DB health + generate昨天 + send 1条（<15s）')
     parser.add_argument('--verify-db', action='store_true',
                        help='只读验收：DB health + integrity_check + journal_mode（<5s）')
+    parser.add_argument('--send-existing-report', type=str, metavar='DATE',
+                       help='秒级测试发送：从 DB 读取已有日报快速发送（格式: YYYY-MM-DD）')
     parser.add_argument('--date', type=str,
                        help='指定日期 (格式: YYYY-MM-DD)，默认为今天')
 
     args = parser.parse_args()
+
+    # 优先处理：秒级测试发送（快速路径）
+    if args.send_existing_report:
+        report_date = args.send_existing_report
+        print(f"\n" + "=" * 60)
+        print(f"秒级测试发送日报：{report_date}")
+        print("=" * 60)
+
+        success = send_existing_report_fast(report_date)
+
+        print("\n" + "=" * 60)
+        if success:
+            print("✓ 测试邮件发送成功！")
+            print(f"  主题: 🧪 TEST Daily Report - {report_date} (From DB)")
+            print("  请检查邮箱收件")
+        else:
+            print("✗ 测试邮件发送失败")
+        print("=" * 60)
+        sys.exit(0)
 
     if args.verify_db:
         # 只读验收：DB health + integrity + journal_mode

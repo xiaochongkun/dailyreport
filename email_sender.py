@@ -75,28 +75,45 @@ def query_daily_stats(report_date: str) -> dict:
         session.close()
 
 
-def create_smtp_connection():
+def create_smtp_connection(max_retries=3):
     """
-    创建并返回已登录的 SMTP 连接
+    创建并返回已登录的 SMTP 连接（带重试）
+
+    Args:
+        max_retries: 最大重试次数（默认3次）
 
     Returns:
         SMTP 连接对象或 None（失败时）
     """
-    try:
-        smtp = smtplib.SMTP(config.SMTP_SERVER, config.SMTP_PORT, timeout=10)
-        if config.SMTP_USE_TLS:
-            smtp.starttls()
-        smtp.login(config.EMAIL_SENDER, config.EMAIL_PASSWORD)
-        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [EMAIL] smtp_connected")
-        return smtp
-    except Exception as e:
-        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [EMAIL] smtp_failed error={e}")
-        return None
+    import time
+    delay = 2  # 初始延迟2秒
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            smtp = smtplib.SMTP(config.SMTP_SERVER, config.SMTP_PORT, timeout=10)
+            if config.SMTP_USE_TLS:
+                smtp.starttls()
+            smtp.login(config.EMAIL_SENDER, config.EMAIL_PASSWORD)
+
+            if attempt > 1:
+                print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [EMAIL] smtp_connected_retry attempt={attempt}/{max_retries}")
+            else:
+                print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [EMAIL] smtp_connected")
+            return smtp
+        except Exception as e:
+            if attempt < max_retries:
+                print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [EMAIL] smtp_retry attempt={attempt}/{max_retries} delay={delay}s error={type(e).__name__}")
+                time.sleep(delay)
+                delay *= 2  # 指数退避
+            else:
+                print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [EMAIL] smtp_failed max_retries_exceeded error={type(e).__name__}: {str(e)}")
+
+    return None
 
 
 def send_email(subject: str, body: str, recipients: list = None) -> bool:
     """
-    通用邮件发送函数（retry 1次）
+    通用邮件发送函数（带重试和指数退避）
 
     Args:
         subject: 邮件标题
@@ -111,7 +128,10 @@ def send_email(subject: str, body: str, recipients: list = None) -> bool:
     if recipients is None:
         recipients = config.EMAIL_RECIPIENTS
 
-    for attempt in range(2):
+    max_retries = 3
+    delay = 2  # 初始延迟2秒
+
+    for attempt in range(1, max_retries + 1):
         try:
             msg = MIMEMultipart()
             msg['From'] = config.EMAIL_SENDER
@@ -125,18 +145,25 @@ def send_email(subject: str, body: str, recipients: list = None) -> bool:
             smtp.send_message(msg)
             smtp.quit()
 
-            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [EMAIL] sent subject='{subject[:50]}'")
+            if attempt > 1:
+                print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [EMAIL] sent_retry attempt={attempt}/{max_retries} subject='{subject[:50]}'")
+            else:
+                print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [EMAIL] sent subject='{subject[:50]}'")
             return True
         except Exception as e:
-            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [EMAIL] failed attempt={attempt+1} error={e}")
-            if attempt == 0:
-                time.sleep(2)
+            if attempt < max_retries:
+                print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [EMAIL] send_retry attempt={attempt}/{max_retries} delay={delay}s error={type(e).__name__}")
+                time.sleep(delay)
+                delay *= 2  # 指数退避
+            else:
+                print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [EMAIL] send_failed max_retries_exceeded error={type(e).__name__}: {str(e)}")
+
     return False
 
 
 def send_html_email(subject: str, html_body: str, recipients: list = None) -> bool:
     """
-    发送 HTML 格式邮件（带纯文本 fallback，retry 1次）
+    发送 HTML 格式邮件（带纯文本 fallback 和重试）
 
     Args:
         subject: 邮件标题
@@ -151,7 +178,10 @@ def send_html_email(subject: str, html_body: str, recipients: list = None) -> bo
     if recipients is None:
         recipients = config.EMAIL_RECIPIENTS
 
-    for attempt in range(2):
+    max_retries = 3
+    delay = 2  # 初始延迟2秒
+
+    for attempt in range(1, max_retries + 1):
         try:
             msg = MIMEMultipart('alternative')
             msg['From'] = config.EMAIL_SENDER
@@ -170,12 +200,19 @@ def send_html_email(subject: str, html_body: str, recipients: list = None) -> bo
             smtp.send_message(msg)
             smtp.quit()
 
-            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [EMAIL] html_sent subject='{subject[:50]}'")
+            if attempt > 1:
+                print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [EMAIL] html_sent_retry attempt={attempt}/{max_retries} subject='{subject[:50]}'")
+            else:
+                print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [EMAIL] html_sent subject='{subject[:50]}'")
             return True
         except Exception as e:
-            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [EMAIL] html_failed attempt={attempt+1} error={e}")
-            if attempt == 0:
-                time.sleep(2)
+            if attempt < max_retries:
+                print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [EMAIL] html_send_retry attempt={attempt}/{max_retries} delay={delay}s error={type(e).__name__}")
+                time.sleep(delay)
+                delay *= 2  # 指数退避
+            else:
+                print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [EMAIL] html_send_failed max_retries_exceeded error={type(e).__name__}: {str(e)}")
+
     return False
 
 
@@ -396,17 +433,16 @@ def send_single_trade_alert_html(trade_info: dict, message_data: dict, threshold
 
     # 提取关键字段
     asset = trade_info.get('asset', 'Unknown')
-    volume = trade_info.get('volume', 0.0)
     exchange = trade_info.get('exchange', 'Unknown')
-    contract = trade_info.get('contract', 'Unknown')
     strategy = trade_info.get('strategy', 'Unknown')
-    instrument_type = trade_info.get('instrument_type', 'Unknown')
-    side = trade_info.get('side', 'Unknown')
-    price = trade_info.get('price', 'Unknown')
-    iv = trade_info.get('iv', 'Unknown')
-    amount_usd = trade_info.get('amount_usd', 0.0)
-    spot_price = trade_info.get('spot_price', 'N/A')
     greeks = trade_info.get('greeks', {})
+
+    # ⚠️ 修正：提取 legs 信息
+    options_legs = trade_info.get('options_legs', [])
+    non_options_legs = trade_info.get('non_options_legs', [])
+
+    # 计算 options legs 的最大 volume
+    options_max_volume = max([leg.get('volume', 0) for leg in options_legs], default=0)
 
     # 格式化时间
     try:
@@ -475,39 +511,64 @@ def send_single_trade_alert_html(trade_info: dict, message_data: dict, threshold
 
         <div class="section">
             <div class="section-title">📈 期权腿信息 (Options Legs)</div>
-            <div class="field-row">
-                <span class="field-label">合约:</span>
-                <span class="field-value">{contract}</span>
+            {''.join([f'''
+            <div style="background: #fef3c7; border-left: 4px solid #f59e0b; padding: 15px; border-radius: 6px; margin: 10px 0;">
+                <div style="font-weight: bold; color: #92400e; margin-bottom: 8px;">
+                    腿 #{i+1}: {leg.get('contract', 'Unknown')}
+                    {'<span style="background: #dc2626; color: white; padding: 2px 8px; border-radius: 3px; font-size: 11px; margin-left: 8px;">✅ >=阈值</span>' if leg.get('volume', 0) >= threshold else '<span style="color: #9ca3af; font-size: 11px; margin-left: 8px;">—</span>'}
+                </div>
+                <div class="field-row">
+                    <span class="field-label">方向/数量:</span>
+                    <span class="field-value">{leg.get('side', 'Unknown')} <span class="volume-highlight">{leg.get('volume', 0):.1f}x</span></span>
+                </div>
+                <div class="field-row">
+                    <span class="field-label">价格:</span>
+                    <span class="field-value">{f"{leg.get('price_btc', 0):.4f} ₿" if leg.get('price_btc') else "N/A"} {f"(${leg.get('price_usd', 0):,.2f})" if leg.get('price_usd') else ""}</span>
+                </div>
+                <div class="field-row">
+                    <span class="field-label">Total:</span>
+                    <span class="field-value">{f"{leg.get('total_btc', 0):.4f} ₿" if leg.get('total_btc') else "N/A"} {f"(${leg.get('total_usd', 0):,.0f})" if leg.get('total_usd') else ""}</span>
+                </div>
+                <div class="field-row">
+                    <span class="field-label">IV:</span>
+                    <span class="field-value">{f"{leg.get('iv', 0):.2f}%" if leg.get('iv') else "N/A"}</span>
+                </div>
+                <div class="field-row">
+                    <span class="field-label">Ref (现货价):</span>
+                    <span class="field-value">{f"${leg.get('ref_spot_usd', 0):,.2f}" if leg.get('ref_spot_usd') else "N/A"}</span>
+                </div>
+                {f"""<div class="field-row">
+                    <span class="field-label">Quote:</span>
+                    <span class="field-value" style="font-size: 12px;">
+                        bid: {leg.get('bid', 'N/A')} {f"(size: {leg.get('bid_size')})" if leg.get('bid_size') else ""} |
+                        mark: {leg.get('mark', 'N/A')} |
+                        ask: {leg.get('ask', 'N/A')} {f"(size: {leg.get('ask_size')})" if leg.get('ask_size') else ""}
+                    </span>
+                </div>""" if leg.get('bid') or leg.get('mark') or leg.get('ask') else ''}
             </div>
-            <div class="field-row">
-                <span class="field-label">方向:</span>
-                <span class="field-value">{side}</span>
-            </div>
-            <div class="field-row">
-                <span class="field-label">数量:</span>
-                <span class="volume-highlight">{volume:.1f}x</span>
-                <span style="color: #6b7280; font-size: 14px;"> (阈值: {threshold}x)</span>
-            </div>
-            <div class="field-row">
-                <span class="field-label">价格:</span>
-                <span class="field-value">{price}</span>
-            </div>
-            <div class="field-row">
-                <span class="field-label">IV:</span>
-                <span class="field-value">{iv}</span>
-            </div>
-            <div class="field-row">
-                <span class="field-label">现货价:</span>
-                <span class="field-value">{spot_price}</span>
-            </div>
+            ''' for i, leg in enumerate(options_legs)])}
         </div>
 
+        {f'''
         <div class="section">
             <div class="section-title">📉 非期权腿 (Non-Options Legs)</div>
-            <div class="field-row">
-                <span class="field-value" style="color: #9ca3af;">无</span>
+            {''.join([f"""
+            <div style="background: #f3f4f6; border-left: 4px solid #9ca3af; padding: 15px; border-radius: 6px; margin: 10px 0;">
+                <div style="font-weight: bold; color: #4b5563; margin-bottom: 8px;">
+                    腿 #{i+1}: {leg.get('contract', 'Unknown')} ({leg.get('instrument_type', 'Unknown')})
+                </div>
+                <div class="field-row">
+                    <span class="field-label">方向/数量:</span>
+                    <span class="field-value">{leg.get('side', 'Unknown')} {leg.get('volume', 0):.1f}x</span>
+                </div>
+                <div class="field-row">
+                    <span class="field-label">价格:</span>
+                    <span class="field-value">{f"{leg.get('price_btc', 0):.4f} ₿" if leg.get('price_btc') else "N/A"} {f"(${leg.get('price_usd', 0):,.2f})" if leg.get('price_usd') else ""}</span>
+                </div>
             </div>
+            """ for i, leg in enumerate(non_options_legs)])}
         </div>
+        ''' if non_options_legs else '<div class="section"><div class="section-title">📉 非期权腿 (Non-Options Legs)</div><div class="field-row"><span class="field-value" style="color: #9ca3af;">无</span></div></div>'}
 
         {f'''
         <div class="section">
@@ -698,7 +759,7 @@ def send_single_trade_alert_html(trade_info: dict, message_data: dict, threshold
 """
 
     # 发送 HTML 邮件
-    print(f"  [发送] OPTIONS 预警邮件: {asset} {volume:.1f}x @ {exchange}")
+    print(f"  [发送] OPTIONS 预警邮件: {asset} {options_max_volume:.1f}x @ {exchange}")
     return send_html_email(subject, html_body)
 
 

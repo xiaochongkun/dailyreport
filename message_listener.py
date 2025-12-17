@@ -20,7 +20,7 @@ class MessageListener:
             client: Telegram 客户端实例
         """
         self.client = client
-        self.session = None
+        # 不再维护持久会话，改为每次操作使用新会话
 
         # 统计信息
         self.total_messages = 0
@@ -61,25 +61,27 @@ class MessageListener:
             # 检查是否为大宗交易
             is_block_trade = config.BLOCK_TRADE_TAG in message_text
 
-            # 保存到数据库
-            if self.session is None:
-                self.session = get_session()
+            # 保存到数据库 - 使用新会话，操作完成后立即关闭
+            session = get_session()
+            try:
+                result = save_message(
+                    session=session,
+                    message_id=message_id,
+                    date=message_date,
+                    text=message_text,
+                    is_block_trade=is_block_trade
+                )
 
-            result = save_message(
-                session=self.session,
-                message_id=message_id,
-                date=message_date,
-                text=message_text,
-                is_block_trade=is_block_trade
-            )
+                if result:
+                    self.total_messages += 1
 
-            if result:
-                self.total_messages += 1
-
-                # 如果是大宗交易，触发警报
-                if is_block_trade:
-                    self.block_trades += 1
-                    await self.trigger_alert(result)
+                    # 如果是大宗交易，触发警报
+                    if is_block_trade:
+                        self.block_trades += 1
+                        await self.trigger_alert(result)
+            finally:
+                # 确保会话被关闭，释放数据库锁
+                session.close()
 
         except Exception as e:
             print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [LISTENER] error={e}")
@@ -113,11 +115,9 @@ class MessageListener:
 
     def close(self):
         """关闭监听器（不抛异常）"""
-        try:
-            if self.session:
-                self.session.close()
-        except Exception:
-            pass
+        # 由于不再维护持久会话，这里无需关闭会话
+        # 每次消息处理已在 finally 块中关闭会话
+        pass
 
 
 async def send_alert_email(message_data):
@@ -154,29 +154,25 @@ async def send_alert_email(message_data):
 
         # 提取关键字段
         asset = trade_info.get('asset', 'Unknown')
-        volume = trade_info.get('volume', 0.0)
         exchange = trade_info.get('exchange', 'Unknown')
         instrument_type = trade_info.get('instrument_type', 'Unknown')
         contract = trade_info.get('contract', 'Unknown')
 
-        # ✅ 硬规则 1: Option Only - 只对 OPTIONS 触发预警
-        if instrument_type != 'OPTIONS':
-            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [ALERT_SKIP] reason=non_option instrument={instrument_type} contract={contract} msg_id={msg_id}")
-            return
+        # ⚠️ 修正：提取 options legs 和 non-options legs
+        options_legs = trade_info.get('options_legs', [])
+        non_options_legs = trade_info.get('non_options_legs', [])
 
-        # ✅ 硬规则 2: 排除 FUTURES/PERPETUAL（双重检查，防止解析错误）
-        if any(keyword in raw_text.upper() for keyword in ['PERPETUAL', 'PERP', '-PERP', 'FUTURES', '-FUT']):
-            # 再次检查合约名
-            if 'PERPETUAL' in contract.upper() or 'PERP' in contract.upper() or 'FUT' in contract.upper():
-                print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [ALERT_SKIP] reason=non_option instrument=FUTURES/PERPETUAL contract={contract} msg_id={msg_id}")
-                return
+        # ✅ 硬规则 1: Option Only - 必须有至少一条 OPTIONS 腿
+        if not options_legs:
+            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [ALERT_SKIP] reason=no_option_legs asset={asset} instrument={instrument_type} contract={contract} msg_id={msg_id}")
+            return
 
         # 检查交易所（可选过滤）
         if exchange != config.MONITORED_EXCHANGE:
             print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [ALERT_SKIP] reason=wrong_exchange exchange={exchange} msg_id={msg_id}")
             return
 
-        # ✅ 硬规则 3: 区分 BTC/ETH 阈值（支持测试模式）
+        # ✅ 硬规则 2: 区分 BTC/ETH 阈值（支持测试模式）
         if asset == 'BTC':
             threshold = config.BTC_VOLUME_THRESHOLD  # 默认 200
         elif asset == 'ETH':
@@ -190,13 +186,31 @@ async def send_alert_email(message_data):
             print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [ALERT_SKIP] reason=unknown_asset asset={asset} msg_id={msg_id}")
             return
 
-        # 检查是否超过阈值
-        if volume <= threshold:
-            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [ALERT_SKIP] reason=below_threshold asset={asset} volume={volume} threshold={threshold} msg_id={msg_id}")
+        # ⚠️ 修正：计算 options legs 的最大 volume
+        options_max_volume = max([leg.get('volume', 0) for leg in options_legs], default=0)
+
+        # 打印 ALERT_PREP 日志（新增）
+        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [ALERT_PREP] asset={asset} exchange={exchange} options_legs={len(options_legs)} non_options_legs={len(non_options_legs)} options_max_volume={options_max_volume} threshold={threshold} trigger={options_max_volume > threshold}")
+
+        # 打印每条腿的详细信息（debug级别）
+        for leg in options_legs:
+            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [ALERT_LEG] type=OPTIONS side={leg.get('side')} contract={leg.get('contract')} volume={leg.get('volume')} price_btc={leg.get('price_btc')} total_usd={leg.get('total_usd')} ref={leg.get('ref_spot_usd')}")
+
+        # 检查是否超过阈值（基于最大 volume）
+        if options_max_volume <= threshold:
+            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [ALERT_SKIP] reason=below_threshold asset={asset} options_max_volume={options_max_volume} threshold={threshold} msg_id={msg_id}")
             return
 
+        # 打印 Ref 提取日志
+        ref_price_usd = trade_info.get('ref_price_usd', None)
+        spot_price_str = trade_info.get('spot_price', 'N/A')
+        if ref_price_usd is not None:
+            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [ALERT] ref_extracted=true ref_price_usd={ref_price_usd} spot_price={spot_price_str} contract={contract} msg_id={msg_id}")
+        else:
+            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [ALERT] ref_extracted=false reason=no_ref_in_text contract={contract} msg_id={msg_id}")
+
         # ✅ 发送预警邮件（OPTIONS ONLY）
-        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [ALERT_SEND] option_trade asset={asset} volume={volume} threshold={threshold} contract={contract} msg_id={msg_id}")
+        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [ALERT_SEND] option_trade asset={asset} options_max_volume={options_max_volume} threshold={threshold} contract={contract} msg_id={msg_id}")
 
         success = send_single_trade_alert_html(
             trade_info=trade_info,

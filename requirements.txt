@@ -1,0 +1,23 @@
+# Telegram 数据采集依赖
+telethon>=1.35.0
+
+# 可选：加密支持（提升连接速度和安全性）
+cryptg>=0.4.0
+
+# 数据库
+sqlalchemy>=2.0.0
+
+# 定时任务
+apscheduler>=3.10.0
+
+# 时区支持
+pytz>=2023.3
+
+# 数据处理
+pandas>=2.0.0
+
+# 环境变量管理
+python-dotenv>=1.0.0
+
+# 文件锁（防止并发写入）
+filelock>=3.13.0
