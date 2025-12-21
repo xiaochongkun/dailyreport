@@ -47,11 +47,31 @@ def normalize_block_trades(block_trades, filter_non_options=False):
             except Exception:
                 pass
 
+            # ⚠️ 修正：对于多腿策略，重新计算 volume 和 amount_usd（从 options_legs 推导）
+            options_legs = parsed.get('options_legs', [])
+
+            if len(options_legs) >= 1:
+                # 有期权腿：使用 options_sum 作为 volume（所有期权腿张数总和）
+                volume_display = parsed.get('options_sum', 0)
+
+                # 计算 amount_usd：所有期权腿的 total_usd 总和
+                amount_usd_display = sum(
+                    leg.get('total_usd', 0) for leg in options_legs if leg.get('total_usd')
+                )
+
+                # 如果 amount_usd 为0，回退到全局解析值
+                if amount_usd_display == 0:
+                    amount_usd_display = parsed.get('amount_usd', 0.0)
+            else:
+                # 无期权腿：使用全局解析值
+                volume_display = parsed.get('volume', 0.0)
+                amount_usd_display = parsed.get('amount_usd', 0.0)
+
             normalized.append({
                 'asset': parsed.get('asset', 'Unknown'),
-                'volume': parsed.get('volume', 0.0),
+                'volume': volume_display,  # ⚠️ 修正：多腿时为 options_sum
                 'exchange': parsed.get('exchange', 'Unknown'),
-                'amount_usd': parsed.get('amount_usd', 0.0),
+                'amount_usd': amount_usd_display,  # ⚠️ 修正：多腿时为各腿总和
                 'ts': ts,
                 'date': date_str,  # 兼容 legacy template
                 'raw_text': trade.text or '',
@@ -65,11 +85,14 @@ def normalize_block_trades(block_trades, filter_non_options=False):
                 'premium': parsed.get('premium', 'Unknown'),
                 'instrument_type': parsed.get('instrument_type', 'Unknown'),
                 'greeks': parsed.get('greeks', {}),
-                'options_legs': parsed.get('options_legs', []),  # ⚠️ 新增
+                'options_legs': options_legs,  # ⚠️ 新增
                 'non_options_legs': parsed.get('non_options_legs', []),  # ⚠️ 新增
                 'msg_id': getattr(trade, 'message_id', 'Unknown'),  # 添加 message_id
                 'side': parsed.get('side', 'Unknown'),  # 添加 side
-                'spot_price': parsed.get('spot_price', 'N/A')  # 添加 spot_price
+                'spot_price': parsed.get('spot_price', 'N/A'),  # 添加 spot_price
+                # ⚠️ 新增：添加推导字段用于调试和验证
+                'options_sum': parsed.get('options_sum', 0),  # 期权腿总张数（推导字段）
+                'options_count': len(options_legs),  # 期权腿数量
             })
         except Exception as e:
             # 解析失败，添加默认值
@@ -1182,6 +1205,10 @@ def parse_block_trade_message(text):
                 elif re.search(r'-\d+-[PC]$', contract_name):  # 以 -数字-P/C 结尾
                     current_leg['instrument_type'] = 'OPTIONS'
                     result['options_legs'].append(current_leg)
+                else:
+                    # 未分类的合约（如 BTC-27MAR26，可能是 FUTURES 或 SPOT）
+                    current_leg['instrument_type'] = 'FUTURES'
+                    result['non_options_legs'].append(current_leg)
 
             # 开始新的腿
             side_str = leg_match.group(1)  # Bought / Sold
@@ -1258,10 +1285,47 @@ def parse_block_trade_message(text):
         elif re.search(r'-\d+-[PC]$', contract_name):
             current_leg['instrument_type'] = 'OPTIONS'
             result['options_legs'].append(current_leg)
+        else:
+            # 未分类的合约（如 BTC-27MAR26，可能是 FUTURES 或 SPOT）
+            current_leg['instrument_type'] = 'FUTURES'
+            result['non_options_legs'].append(current_leg)
 
     # 如果有多个期权腿，更新 contract 显示
     if len(result['options_legs']) > 1:
         result['contract'] = f"合约（{len(result['options_legs'])}腿）"
+
+    # ⚠️ 修正：添加预警专用推导字段（消除全局正则串线）
+    # 这些字段专门用于预警判断，从 options_legs 推导而来
+    result['options_sum'] = sum(leg.get('volume', 0) for leg in result['options_legs'])
+    result['options_max'] = max([leg.get('volume', 0) for leg in result['options_legs']], default=0)
+    result['options_count'] = len(result['options_legs'])
+
+    # 修正 instrument_type：基于 options_legs 是否存在（而非全局正则）
+    if result['options_legs']:
+        result['instrument_type_derived'] = 'OPTIONS'
+    elif result['non_options_legs']:
+        # 从第一条非期权腿推导
+        first_non_option = result['non_options_legs'][0]
+        result['instrument_type_derived'] = first_non_option.get('instrument_type', 'Unknown')
+    else:
+        result['instrument_type_derived'] = result['instrument_type']  # fallback 到全局判断
+
+    # 修正 spot_price：从 legs 中的 ref 推导（优先级：最后一条腿 > 出现最多的值）
+    ref_values = []
+    for leg in result['options_legs'] + result['non_options_legs']:
+        if leg.get('ref_spot_usd'):
+            ref_values.append(leg['ref_spot_usd'])
+
+    if ref_values:
+        # 取最后一个 ref 值（通常最新）
+        result['spot_price_derived'] = f"${ref_values[-1]:,.2f}"
+        result['ref_price_usd'] = ref_values[-1]
+    else:
+        # fallback 到全局解析的 spot_price
+        result['spot_price_derived'] = result.get('spot_price', 'N/A')
+
+    # 修正 contract_list：所有期权合约列表（用于预警显示）
+    result['options_contracts'] = [leg.get('contract', 'Unknown') for leg in result['options_legs']]
 
     return result
 
@@ -1288,7 +1352,8 @@ def build_trade_card_html(trades, title, sort_type):
 
     html = f"<h3>{title}</h3>"
 
-    for trade in trades:
+    # ✅ 修正：使用enumerate直接获取正确的排名（1, 2, 3），不依赖trade['rank']
+    for rank, trade in enumerate(trades, 1):
         # ⚠️ 修正：Greeks改为紧凑横排显示（单行，类似标签）
         def format_greek(value):
             """格式化希腊值（处理大数和None）"""
@@ -1321,26 +1386,56 @@ def build_trade_card_html(trades, title, sort_type):
         # ⚠️ 修正：使用strategy_title（如果有），否则fallback到strategy
         strategy_display = trade.get('strategy_title', trade.get('strategy', 'Unknown'))
 
-        # ⚠️ 修正：支持多腿显示
+        # ⚠️ 修正：支持多腿显示（显示完整信息）
         options_legs = trade.get('options_legs', [])
         non_options_legs = trade.get('non_options_legs', [])
 
-        # 合约字段：单腿显示合约名，多腿显示"合约（X腿）"并列出每条腿
+        # 合约字段：单腿显示合约名，多腿显示"合约（X腿）"并列出每条腿的详细信息
         if len(options_legs) > 1:
             contract_html = f'<tr><td><strong>合约:</strong></td><td>{trade["contract"]}</td></tr>'
-            contract_html += '<tr><td colspan="2"><ul style="margin: 5px 0; padding-left: 20px; font-size: 12px;">'
-            for leg in options_legs:
-                contract_html += f'<li>{leg.get("side", "?")} {leg.get("volume", "?")}x {leg.get("contract", "Unknown")}</li>'
-            contract_html += '</ul></td></tr>'
+            contract_html += '<tr><td colspan="2">'
+            contract_html += '<div style="background: #fef3c7; border-left: 3px solid #f59e0b; padding: 8px; margin: 5px 0; border-radius: 4px;">'
+            contract_html += '<strong>期权腿详情:</strong><ul style="margin: 5px 0 0 0; padding-left: 20px; list-style: none;">'
+            for i, leg in enumerate(options_legs, 1):
+                side_icon = '🟢' if leg.get('side') == 'LONG' else '🔴'
+                leg_volume = leg.get('volume', 0)
+                leg_contract = leg.get('contract', 'Unknown')
+                leg_price_btc = leg.get('price_btc', 0)
+                leg_total_usd = leg.get('total_usd', 0)
+                leg_iv = leg.get('iv', 0)
+
+                leg_html = f'<li style="margin: 4px 0; font-size: 12px; line-height: 1.6;">'
+                leg_html += f'{side_icon} <strong>腿{i}:</strong> {leg.get("side", "?")} {leg_volume:.0f}x {leg_contract}'
+
+                # 添加价格和总金额信息
+                if leg_price_btc:
+                    leg_html += f' @ {leg_price_btc:.4f} ₿'
+                if leg_total_usd:
+                    leg_html += f' (${leg_total_usd:,.0f})'
+
+                # 添加IV信息
+                if leg_iv:
+                    leg_html += f', IV: {leg_iv:.2f}%'
+
+                leg_html += '</li>'
+                contract_html += leg_html
+
+            contract_html += '</ul></div></td></tr>'
         else:
             contract_html = f'<tr><td><strong>合约:</strong></td><td>{trade["contract"]}</td></tr>'
 
         # price字段：单腿每张价格
         price_display = trade.get('price', 'Unknown')
 
+        # ⚠️ 新增：ALSO_IN 标签显示
+        also_in_tag = trade.get('also_in')
+        also_in_html = ''
+        if also_in_tag:
+            also_in_html = f'<span style="display: inline-block; background: #3498db; color: white; padding: 2px 8px; border-radius: 3px; font-size: 11px; margin-left: 10px;">{also_in_tag}</span>'
+
         html += f"""
         <div class="trade-card">
-            <div class="trade-header">#{trade['rank']} - {trade['date']}</div>
+            <div class="trade-header">#{rank} - {trade['date']}{also_in_html}</div>
             <table>
                 <tr><td><strong>交易策略:</strong></td><td>{strategy_display}</td></tr>
                 {sort_value_html}
@@ -1362,6 +1457,8 @@ def build_daily_report_html(report_data):
     """
     构建每日报告 HTML 内容
 
+    ⚠️ 修正：添加 ALSO_IN 交叉引用标签
+
     Args:
         report_data: 报告数据字典
 
@@ -1372,6 +1469,47 @@ def build_daily_report_html(report_data):
     spot_prices = report_data['spot_prices']
     stats = report_data['trade_statistics']
     top_trades = report_data['top_trades']
+
+    # ⚠️ 新增：为交易添加 ALSO_IN 标签（检测同时出现在两个榜单的交易）
+    def add_also_in_tags(trades_by_amount, trades_by_volume):
+        """
+        为同时出现在两个榜单的交易添加 ALSO_IN 标签
+
+        Args:
+            trades_by_amount: 按金额排名的交易列表
+            trades_by_volume: 按数量排名的交易列表
+        """
+        # 构建 msg_id -> rank 映射
+        amount_map = {t['msg_id']: i+1 for i, t in enumerate(trades_by_amount)}
+        volume_map = {t['msg_id']: i+1 for i, t in enumerate(trades_by_volume)}
+
+        # 为 amount 榜单添加标签
+        for trade in trades_by_amount:
+            msg_id = trade['msg_id']
+            if msg_id in volume_map:
+                volume_rank = volume_map[msg_id]
+                trade['also_in'] = f"[ALSO_IN: VOLUME #{volume_rank}]"
+            else:
+                trade['also_in'] = None
+
+        # 为 volume 榜单添加标签
+        for trade in trades_by_volume:
+            msg_id = trade['msg_id']
+            if msg_id in amount_map:
+                amount_rank = amount_map[msg_id]
+                trade['also_in'] = f"[ALSO_IN: AMOUNT #{amount_rank}]"
+            else:
+                trade['also_in'] = None
+
+    # 处理 BTC 和 ETH 的交叉引用
+    add_also_in_tags(
+        top_trades.get('btc_by_amount', []),
+        top_trades.get('btc_by_volume', [])
+    )
+    add_also_in_tags(
+        top_trades.get('eth_by_amount', []),
+        top_trades.get('eth_by_volume', [])
+    )
 
     html = f"""
     <!DOCTYPE html>
@@ -1695,73 +1833,128 @@ def send_existing_report_fast(report_date: str):
 
 async def send_pending_daily_reports(limit: int = None):
     """
-    发送待发送的每日报告邮件（16:05 定时任务）
+    发送待发送的每日报告邮件（16:05 定时任务）- 策略 B（体验优先）
 
-    从数据库读取尚未发送的报告并发送邮件
+    ⚠️ 策略变更（2025-12-21）：
+    - 每天最多发送 1 封日报（只发最新 report_date）
+    - 历史未发送日报不自动补发（只记录告警日志）
+    - 幂等性保障：发送前后原子更新状态
 
     Args:
-        limit: 最多处理多少条报告（None表示全部）
+        limit: 保留参数（兼容性），实际已改为"最多发送1封最新日报"
     """
     import time
+    from sqlalchemy import desc
     session = get_session()
 
     try:
-        pending_reports = session.query(DailyReport).filter_by(is_sent=False).all()
+        # ==========================================
+        # A) 查询最新 report_date 的未发送日报（候选）
+        # ==========================================
+        latest_pending_report = (
+            session.query(DailyReport)
+            .filter_by(is_sent=False)
+            .order_by(desc(DailyReport.report_date))
+            .first()
+        )
 
-        if not pending_reports:
-            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [SEND_DAILY_REPORT] no_pending")
+        if not latest_pending_report:
+            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [REPORT_SEND] mode=latest_only action=skip reason=no_pending")
             return
 
+        latest_date = latest_pending_report.report_date
+        candidate_sent = latest_pending_report.is_sent
+
+        # ==========================================
+        # B) 统计历史未发送日报（backlog）
+        # ==========================================
+        backlog_reports = (
+            session.query(DailyReport)
+            .filter(DailyReport.is_sent == False)
+            .filter(DailyReport.report_date < latest_date)
+            .order_by(DailyReport.report_date)
+            .all()
+        )
+
+        backlog_count = len(backlog_reports)
+        oldest_backlog = backlog_reports[0].report_date if backlog_reports else None
+        newest_backlog = backlog_reports[-1].report_date if backlog_reports else None
+
+        # 结构化日志：候选日报信息
+        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [REPORT_SEND] mode=latest_only report_date={latest_date} candidate_sent={candidate_sent} pending_old={backlog_count}")
+
+        # 告警：历史未发送日报
+        if backlog_count > 0:
+            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [REPORT_BACKLOG] count={backlog_count} oldest={oldest_backlog} newest={newest_backlog} action=ignored reason=policy_latest_only")
+
+        # ==========================================
+        # C) 检查候选日报是否已发送（幂等）
+        # ==========================================
+        if candidate_sent:
+            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [REPORT_SEND] action=skip report_date={latest_date} reason=already_sent")
+            return
+
+        # ==========================================
+        # D) 检查邮件配置
+        # ==========================================
         if not config.EMAIL_ENABLED:
-            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [SEND_DAILY_REPORT] skip_email_disabled pending_count={len(pending_reports)}")
+            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [REPORT_SEND] action=skip report_date={latest_date} reason=email_disabled")
             return
 
-        if limit is not None:
-            pending_reports = pending_reports[:limit]
-
-        start_time = time.time()
-
+        # ==========================================
+        # E) 发送最新日报（带幂等保障）
+        # ==========================================
         from email_sender import send_html_email, send_email
 
-        for report in pending_reports:
-            if limit is not None and (time.time() - start_time) > 5:
-                print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [SEND_DAILY_REPORT] timeout limit={limit}")
-                break
+        try:
+            subject = f"📊 Daily Trade Report - {latest_pending_report.report_date}"
 
-            try:
-                subject = f"📊 Daily Trade Report - {report.report_date}"
+            # 发送前日志（标记开始发送）
+            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [REPORT_SEND] action=sending report_date={latest_date} subject='{subject[:50]}' recipients={config.EMAIL_RECIPIENTS}")
 
-                if report.html_content:
-                    success = send_html_email(subject, report.html_content)
-                else:
-                    fallback_body = f"""Daily Trade Report - {report.report_date}
+            # 发送邮件
+            if latest_pending_report.html_content:
+                success = send_html_email(subject, latest_pending_report.html_content)
+            else:
+                fallback_body = f"""Daily Trade Report - {latest_pending_report.report_date}
 
-BTC: {report.btc_trade_count} 笔, {report.btc_total_volume}x
-ETH: {report.eth_trade_count} 笔, {report.eth_total_volume}x
-Total: {report.total_messages} 条消息, {report.total_block_trades} 笔交易
+BTC: {latest_pending_report.btc_trade_count} 笔, {latest_pending_report.btc_total_volume}x
+ETH: {latest_pending_report.eth_trade_count} 笔, {latest_pending_report.eth_total_volume}x
+Total: {latest_pending_report.total_messages} 条消息, {latest_pending_report.total_block_trades} 笔交易
 """
-                    success = send_email(subject, fallback_body)
+                success = send_email(subject, fallback_body)
 
-                if success:
-                    try:
-                        report.is_sent = True
-                        report.sent_at = datetime.utcnow()
-                        session.flush()
-                        session.commit()
-                    except Exception as commit_err:
-                        session.rollback()
-                        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [SEND_DAILY_REPORT] commit_failed report_date={report.report_date} error={commit_err}")
+            # ==========================================
+            # F) 原子更新发送状态（幂等保障）
+            # ==========================================
+            if success:
+                try:
+                    # 原子更新：is_sent + sent_at
+                    latest_pending_report.is_sent = True
+                    latest_pending_report.sent_at = datetime.utcnow()
+                    session.flush()
+                    session.commit()
 
-                    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [SEND_DAILY_REPORT] sent report_date={report.report_date}")
-                else:
-                    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [SEND_DAILY_REPORT] failed report_date={report.report_date} reason=email_send_failed")
+                    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [REPORT_SEND] action=sent report_date={latest_date} sent_at={latest_pending_report.sent_at.strftime('%Y-%m-%d %H:%M:%S')}")
 
-            except Exception as e:
-                print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [SEND_DAILY_REPORT] failed report_date={report.report_date} reason={e}")
-                # 继续下一个，不中断
+                except Exception as commit_err:
+                    session.rollback()
+                    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [REPORT_SEND] action=commit_failed report_date={latest_date} error={type(commit_err).__name__}: {commit_err}")
+                    # ⚠️ 发送成功但状态更新失败：下次会重复发送（幂等风险）
+                    raise
+
+            else:
+                # 发送失败：保持 is_sent=False，记录错误日志
+                print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [REPORT_SEND] action=send_failed report_date={latest_date} reason=email_send_failed")
+
+        except Exception as send_err:
+            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [REPORT_SEND] action=exception report_date={latest_date} error={type(send_err).__name__}: {send_err}")
+            raise
 
     except Exception as e:
-        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [SEND_DAILY_REPORT] error={e}")
+        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [REPORT_SEND] action=error error={type(e).__name__}: {e}")
+        import traceback
+        traceback.print_exc()
 
     finally:
         session.close()

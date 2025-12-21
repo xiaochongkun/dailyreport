@@ -437,12 +437,28 @@ def send_single_trade_alert_html(trade_info: dict, message_data: dict, threshold
     strategy = trade_info.get('strategy', 'Unknown')
     greeks = trade_info.get('greeks', {})
 
-    # ⚠️ 修正：提取 legs 信息
+    # ⚠️ 修正：提取 legs 信息（使用推导字段）
     options_legs = trade_info.get('options_legs', [])
     non_options_legs = trade_info.get('non_options_legs', [])
 
-    # 计算 options legs 的最大 volume
-    options_max_volume = max([leg.get('volume', 0) for leg in options_legs], default=0)
+    # 使用推导字段：整笔订单期权腿总张数
+    options_sum = trade_info.get('options_sum', 0)
+    options_count = trade_info.get('options_count', 0)
+    spot_price_derived = trade_info.get('spot_price_derived', 'N/A')
+
+    # ⚠️ 修正：添加英文模板需要的字段定义
+    # 为了向后兼容，同时定义旧字段（但优先使用推导字段）
+    contract = trade_info.get('contract', 'Unknown')
+    instrument_type = trade_info.get('instrument_type', 'Unknown')
+    side = trade_info.get('side', 'Unknown')
+    volume = trade_info.get('options_max', 0)  # 英文模板遗留：使用单腿最大值
+    options_max_volume = trade_info.get('options_max', 0)  # 单腿最大张数
+
+    # 补充其他可能需要的字段
+    iv = trade_info.get('iv', 'N/A')
+    price = trade_info.get('price', 'N/A')
+    amount_usd = trade_info.get('amount_usd', 0.0)
+    spot_price = spot_price_derived  # 别名
 
     # 格式化时间
     try:
@@ -507,6 +523,30 @@ def send_single_trade_alert_html(trade_info: dict, message_data: dict, threshold
                 <span class="field-label">时间:</span>
                 <span class="field-value">{trade_time}</span>
             </div>
+            <div class="field-row">
+                <span class="field-label">现货价 (Ref):</span>
+                <span class="field-value">{spot_price_derived}</span>
+            </div>
+        </div>
+
+        <div class="section">
+            <div class="section-title">🚨 预警触发信息</div>
+            <div class="field-row">
+                <span class="field-label">期权腿总张数:</span>
+                <span class="field-value"><span class="volume-highlight">{options_sum:.1f}x</span></span>
+            </div>
+            <div class="field-row">
+                <span class="field-label">期权腿数量:</span>
+                <span class="field-value">{options_count} 条腿</span>
+            </div>
+            <div class="field-row">
+                <span class="field-label">触发阈值:</span>
+                <span class="field-value">{threshold}x</span>
+            </div>
+            <div class="field-row">
+                <span class="field-label">超出幅度:</span>
+                <span class="field-value" style="color: #dc2626; font-weight: bold;">{((options_sum / threshold - 1) * 100):.1f}%</span>
+            </div>
         </div>
 
         <div class="section">
@@ -515,7 +555,6 @@ def send_single_trade_alert_html(trade_info: dict, message_data: dict, threshold
             <div style="background: #fef3c7; border-left: 4px solid #f59e0b; padding: 15px; border-radius: 6px; margin: 10px 0;">
                 <div style="font-weight: bold; color: #92400e; margin-bottom: 8px;">
                     腿 #{i+1}: {leg.get('contract', 'Unknown')}
-                    {'<span style="background: #dc2626; color: white; padding: 2px 8px; border-radius: 3px; font-size: 11px; margin-left: 8px;">✅ >=阈值</span>' if leg.get('volume', 0) >= threshold else '<span style="color: #9ca3af; font-size: 11px; margin-left: 8px;">—</span>'}
                 </div>
                 <div class="field-row">
                     <span class="field-label">方向/数量:</span>
@@ -614,9 +653,9 @@ def send_single_trade_alert_html(trade_info: dict, message_data: dict, threshold
 </html>
 """
     else:
-        # 英文模板（原有逻辑）
+        # 英文模板（修正：使用 options_sum 显示期权腿总和）
         test_prefix = "[TEST] " if test_mode else ""
-        subject = f"{test_prefix}🚨 Large {asset} OPTIONS Alert - {contract} - Volume {volume:.1f}x (Threshold: {threshold})"
+        subject = f"{test_prefix}🚨 Large {asset} OPTIONS Alert - Total {options_sum:.1f}x ({options_count} legs) - {exchange} (Threshold: {threshold})"
 
         html_body = f"""
 <!DOCTYPE html>
@@ -685,9 +724,9 @@ def send_single_trade_alert_html(trade_info: dict, message_data: dict, threshold
             </div>
 
             <div class="trade-field">
-                <strong>Volume:</strong>
-                <span class="volume-highlight">{volume:.1f}x</span>
-                <span style="color: #6b7280; font-size: 14px;">(Threshold: {threshold}x)</span>
+                <strong>Total Options Volume:</strong>
+                <span class="volume-highlight">{options_sum:.1f}x</span>
+                <span style="color: #6b7280; font-size: 14px;">(Threshold: {threshold}x, Options Legs: {options_count})</span>
             </div>
 
             <div class="trade-field">
@@ -744,6 +783,37 @@ def send_single_trade_alert_html(trade_info: dict, message_data: dict, threshold
             ''' if any(greeks.values()) else ''}
         </div>
 
+        {f'''
+        <h3 style="color: #4b5563; margin-top: 30px;">Options Legs Details:</h3>
+        {''.join([f"""
+        <div style="background: #fef3c7; border-left: 4px solid #f59e0b; padding: 15px; border-radius: 6px; margin: 10px 0;">
+            <div style="font-weight: bold; color: #92400e; margin-bottom: 8px;">
+                Leg #{i+1}: {leg.get('contract', 'Unknown')}
+            </div>
+            <div class="trade-field">
+                <strong>Side / Volume:</strong>
+                <span class="trade-value">{leg.get('side', 'Unknown')} <span class="volume-highlight">{leg.get('volume', 0):.1f}x</span></span>
+            </div>
+            <div class="trade-field">
+                <strong>Price:</strong>
+                <span class="trade-value">{f"{leg.get('price_btc', 0):.4f} ₿" if leg.get('price_btc') else "N/A"} {f"(${leg.get('price_usd', 0):,.2f})" if leg.get('price_usd') else ""}</span>
+            </div>
+            <div class="trade-field">
+                <strong>Total:</strong>
+                <span class="trade-value">{f"{leg.get('total_btc', 0):.4f} ₿" if leg.get('total_btc') else "N/A"} {f"(${leg.get('total_usd', 0):,.0f})" if leg.get('total_usd') else ""}</span>
+            </div>
+            <div class="trade-field">
+                <strong>IV:</strong>
+                <span class="trade-value">{f"{leg.get('iv', 0):.2f}%" if leg.get('iv') else "N/A"}</span>
+            </div>
+            <div class="trade-field">
+                <strong>Ref Spot:</strong>
+                <span class="trade-value">{f"${leg.get('ref_spot_usd', 0):,.2f}" if leg.get('ref_spot_usd') else "N/A"}</span>
+            </div>
+        </div>
+        """ for i, leg in enumerate(options_legs)])}
+        ''' if options_legs else ''}
+
         <h3 style="color: #4b5563; margin-top: 30px;">Original Message:</h3>
         <div class="message-box">{message_data.get('text', '')[:1000]}</div>
 
@@ -759,7 +829,7 @@ def send_single_trade_alert_html(trade_info: dict, message_data: dict, threshold
 """
 
     # 发送 HTML 邮件
-    print(f"  [发送] OPTIONS 预警邮件: {asset} {options_max_volume:.1f}x @ {exchange}")
+    print(f"  [发送] OPTIONS 预警邮件: {asset} options_sum={options_sum:.1f}x options_legs={options_count} @ {exchange}")
     return send_html_email(subject, html_body)
 
 

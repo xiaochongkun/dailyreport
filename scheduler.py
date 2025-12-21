@@ -98,11 +98,23 @@ async def generate_daily_report_with_retry(target_date=None):
 @retry_on_db_lock(max_retries=5, initial_delay=60)
 async def send_pending_daily_reports_with_retry():
     """
-    发送待发送的每日报告（带数据库锁重试）
+    发送待发送的每日报告（带数据库锁重试）- 策略 B（体验优先）
+
+    ⚠️ 策略变更（2025-12-21）：
+    - 每天最多发送 1 封日报（只发最新 report_date）
+    - 历史未发送日报不自动补发（只记录告警日志）
 
     Returns:
         发送结果
     """
+    # 记录 job 启动
+    import inspect
+    from datetime import datetime
+    module = send_pending_daily_reports.__module__
+    file = inspect.getfile(send_pending_daily_reports)
+    line = inspect.getsourcelines(send_pending_daily_reports)[1]
+    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [SCHED_JOB] id=daily_report_send func=send_pending_daily_reports module={module} file={file} line={line}")
+
     return await send_pending_daily_reports()
 
 

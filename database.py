@@ -143,31 +143,49 @@ def get_db_path(test=False):
     """
     获取数据库文件路径
 
+    ⚠️ 修正：优先使用 config.DB_PATH（支持本地磁盘路径）
+
     Args:
         test: 是否使用测试数据库
 
     Returns:
         数据库文件路径
     """
-    db_dir = os.path.join(os.path.dirname(__file__), 'data')
-    os.makedirs(db_dir, exist_ok=True)
+    import config
 
     if test:
+        db_dir = os.path.join(os.path.dirname(__file__), 'data')
+        os.makedirs(db_dir, exist_ok=True)
         return os.path.join(db_dir, 'reports_test.db')
     else:
-        return os.path.join(db_dir, 'reports.db')
+        # 使用 config.DB_PATH（已配置为本地磁盘路径）
+        db_path = config.DB_PATH
+
+        # 确保目录存在
+        db_dir = os.path.dirname(db_path)
+        if db_dir:
+            os.makedirs(db_dir, exist_ok=True)
+
+        return db_path
 
 
 def ensure_database_health(db_path):
     """
-    数据库健康检测 + 自动恢复
+    数据库健康检测（只读模式 - 不自动修复）
+
+    ⚠️ 修正：严格遵守「只告警+备份+退出」约束
+    - 若 integrity_check 非 ok：只告警+备份副本+抛异常（不自动删除/重建）
+    - 管理员必须手动确认后续操作
 
     Args:
         db_path: 数据库文件路径
 
     Returns:
-        True: 数据库健康或已修复
-        False: 无法修复
+        True: 数据库健康
+        False: 数据库损坏（需手动处理）
+
+    Raises:
+        RuntimeError: 数据库损坏且需要人工介入
     """
     from datetime import datetime
     import shutil
@@ -189,7 +207,7 @@ def ensure_database_health(db_path):
             conn.close()
             return True
         else:
-            # 数据库损坏 - 自动备份并重建
+            # 数据库损坏 - 只告警和备份，不自动重建
             integrity_msg = result[0] if result else 'FAILED'
             print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [DB] corrupt_detected integrity={integrity_msg}")
 
@@ -201,17 +219,17 @@ def ensure_database_health(db_path):
             shutil.copy2(db_path, backup_path)
             print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [DB] backup_created path={backup_path}")
 
-            # 删除损坏文件
-            os.remove(db_path)
-            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [DB] recreated path={db_path}")
-
-            return True
+            # ⚠️ 修正：不自动删除/重建，抛出异常要求人工介入
+            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [DB] halt reason=database_corrupt action_required=manual_recovery")
+            raise RuntimeError(f"Database corrupt (integrity={integrity_msg}), manual recovery required. Backup: {backup_path}")
 
     except sqlite3.OperationalError as e:
         print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [DB] access_error error={e}")
         return False
 
     except Exception as e:
+        if isinstance(e, RuntimeError) and 'manual recovery required' in str(e):
+            raise  # 重新抛出 RuntimeError
         print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [DB] health_check_error error={e}")
         import traceback
         traceback.print_exc()
@@ -223,12 +241,17 @@ def set_sqlite_pragma(dbapi_conn, connection_record):
     """
     在每次连接时设置 SQLite PRAGMA
     启用 WAL 模式和优化性能参数
+
+    ⚠️ 修正：
+    - 本地磁盘：使用 WAL 模式（高并发）
+    - busy_timeout 使用 config.DB_BUSY_TIMEOUT（默认 10秒）
     """
+    import config
     cursor = dbapi_conn.cursor()
 
-    # 使用 DELETE 模式（WAL 在 NFS 上可能有 Bus error）
-    # 更保守但更稳定
-    cursor.execute("PRAGMA journal_mode = DELETE")
+    # 使用 WAL 模式（仅在本地磁盘，不在 NFS）
+    # WAL 模式支持更高的并发性
+    cursor.execute(f"PRAGMA journal_mode = {config.DB_JOURNAL_MODE}")
 
     # 设置同步模式为 NORMAL（在 WAL 模式下足够安全）
     cursor.execute("PRAGMA synchronous = NORMAL")
@@ -242,8 +265,8 @@ def set_sqlite_pragma(dbapi_conn, connection_record):
     # 启用外键约束
     cursor.execute("PRAGMA foreign_keys = ON")
 
-    # 设置 busy_timeout（5秒），防止并发写入时立即失败
-    cursor.execute("PRAGMA busy_timeout = 5000")
+    # 设置 busy_timeout（从 config 读取，默认 10秒）
+    cursor.execute(f"PRAGMA busy_timeout = {config.DB_BUSY_TIMEOUT}")
 
     cursor.close()
 

@@ -31,8 +31,15 @@ TARGET_CHAT_NAME = 'SignalPlus Trade Alert'
 # ============================================
 # 数据库配置
 # ============================================
+# ⚠️ 重要：生产数据库必须在本地磁盘，不能在 NFS 上
+# SQLite 在 NFS 上的文件锁机制不稳定，会导致 "readonly database" 错误
+DB_PATH_OVERRIDE = os.getenv('DB_PATH_OVERRIDE', '/tmp/dailyreport_kunkka/reports.db')
 DB_DIR = os.path.join(os.path.dirname(__file__), 'data')
-DB_PATH = os.path.join(DB_DIR, 'reports.db')
+DB_PATH = DB_PATH_OVERRIDE if DB_PATH_OVERRIDE else os.path.join(DB_DIR, 'reports.db')
+
+# SQLite 配置
+DB_JOURNAL_MODE = os.getenv('DB_JOURNAL_MODE', 'WAL')  # WAL 模式（仅在本地磁盘）
+DB_BUSY_TIMEOUT = int(os.getenv('DB_BUSY_TIMEOUT', '10000'))  # 10秒超时
 
 # ============================================
 # 历史数据导出配置

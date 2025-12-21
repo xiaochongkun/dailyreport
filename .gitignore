@@ -69,3 +69,19 @@ tmp/
 
 # Python version files
 =*.*.*
+
+# Test files and scripts (temporary)
+test_*.py
+test_*.html
+backfill_*.py
+diagnose_*.py
+check_*.py
+send_test_*.py
+
+# Data directory
+data/
+
+# Diagnosis and recovery documents (temporary)
+*_diagnosis_*.md
+RECOVERY_*.md
+alert_diagnosis_*.md

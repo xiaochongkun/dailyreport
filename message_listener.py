@@ -158,13 +158,15 @@ async def send_alert_email(message_data):
         instrument_type = trade_info.get('instrument_type', 'Unknown')
         contract = trade_info.get('contract', 'Unknown')
 
-        # ⚠️ 修正：提取 options legs 和 non-options legs
+        # ⚠️ 修正：提取 options legs 和 non-options legs（使用推导字段）
         options_legs = trade_info.get('options_legs', [])
         non_options_legs = trade_info.get('non_options_legs', [])
+        options_sum = trade_info.get('options_sum', 0)  # 期权腿总张数（推导字段）
+        options_count = trade_info.get('options_count', 0)
 
         # ✅ 硬规则 1: Option Only - 必须有至少一条 OPTIONS 腿
-        if not options_legs:
-            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [ALERT_SKIP] reason=no_option_legs asset={asset} instrument={instrument_type} contract={contract} msg_id={msg_id}")
+        if not options_legs or options_count == 0:
+            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [ALERT_SKIP] reason=no_option_legs asset={asset} options_count={options_count} msg_id={msg_id}")
             return
 
         # 检查交易所（可选过滤）
@@ -186,31 +188,32 @@ async def send_alert_email(message_data):
             print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [ALERT_SKIP] reason=unknown_asset asset={asset} msg_id={msg_id}")
             return
 
-        # ⚠️ 修正：计算 options legs 的最大 volume
-        options_max_volume = max([leg.get('volume', 0) for leg in options_legs], default=0)
-
-        # 打印 ALERT_PREP 日志（新增）
-        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [ALERT_PREP] asset={asset} exchange={exchange} options_legs={len(options_legs)} non_options_legs={len(non_options_legs)} options_max_volume={options_max_volume} threshold={threshold} trigger={options_max_volume > threshold}")
+        # ⚠️ 修正：使用 options_sum（整笔订单期权腿总张数）做阈值判断
+        # 打印结构化日志
+        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [ALERT_PREP] asset={asset} exchange={exchange} options_legs={options_count} non_options_legs={len(non_options_legs)} options_sum={options_sum} threshold={threshold} trigger={options_sum > threshold}")
 
         # 打印每条腿的详细信息（debug级别）
-        for leg in options_legs:
-            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [ALERT_LEG] type=OPTIONS side={leg.get('side')} contract={leg.get('contract')} volume={leg.get('volume')} price_btc={leg.get('price_btc')} total_usd={leg.get('total_usd')} ref={leg.get('ref_spot_usd')}")
+        for i, leg in enumerate(options_legs, 1):
+            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [ALERT_LEG] leg#{i} type=OPTIONS side={leg.get('side')} contract={leg.get('contract')} volume={leg.get('volume')} price_btc={leg.get('price_btc')} total_usd={leg.get('total_usd')} ref={leg.get('ref_spot_usd')}")
 
-        # 检查是否超过阈值（基于最大 volume）
-        if options_max_volume <= threshold:
-            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [ALERT_SKIP] reason=below_threshold asset={asset} options_max_volume={options_max_volume} threshold={threshold} msg_id={msg_id}")
+        # 检查是否超过阈值（基于 options_sum）
+        if options_sum <= threshold:
+            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [ALERT_SKIP] reason=below_threshold asset={asset} options_sum={options_sum} threshold={threshold} msg_id={msg_id}")
             return
 
-        # 打印 Ref 提取日志
+        # 打印 Ref 提取日志（使用推导字段）
         ref_price_usd = trade_info.get('ref_price_usd', None)
-        spot_price_str = trade_info.get('spot_price', 'N/A')
+        spot_price_derived = trade_info.get('spot_price_derived', 'N/A')
+        options_contracts = trade_info.get('options_contracts', [])
+        contracts_str = ', '.join(options_contracts) if options_contracts else 'Unknown'
+
         if ref_price_usd is not None:
-            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [ALERT] ref_extracted=true ref_price_usd={ref_price_usd} spot_price={spot_price_str} contract={contract} msg_id={msg_id}")
+            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [ALERT] ref_extracted=true ref_price_usd={ref_price_usd} spot_price={spot_price_derived} contracts={contracts_str} msg_id={msg_id}")
         else:
-            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [ALERT] ref_extracted=false reason=no_ref_in_text contract={contract} msg_id={msg_id}")
+            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [ALERT] ref_extracted=false reason=no_ref_in_text contracts={contracts_str} msg_id={msg_id}")
 
         # ✅ 发送预警邮件（OPTIONS ONLY）
-        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [ALERT_SEND] option_trade asset={asset} options_max_volume={options_max_volume} threshold={threshold} contract={contract} msg_id={msg_id}")
+        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [ALERT_SEND] asset={asset} options_sum={options_sum} options_legs={options_count} threshold={threshold} contracts={contracts_str} msg_id={msg_id}")
 
         success = send_single_trade_alert_html(
             trade_info=trade_info,
