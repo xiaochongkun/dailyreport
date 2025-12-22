@@ -203,6 +203,9 @@ class TelegramReportBot:
             raise Exception("配置验证失败，请检查 config.py")
         print("✓ 配置验证通过")
 
+        # 打印邮件路由配置（启动时必须打印）
+        config.print_email_config()
+
         # 2. 初始化数据库（内部会调用 ensure_database_health）
         print("\n[2/5] 初始化数据库...")
         try:

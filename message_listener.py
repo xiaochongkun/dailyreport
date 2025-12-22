@@ -188,42 +188,79 @@ async def send_alert_email(message_data):
             print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [ALERT_SKIP] reason=unknown_asset asset={asset} msg_id={msg_id}")
             return
 
-        # ⚠️ 修正：使用 options_sum（整笔订单期权腿总张数）做阈值判断
-        # 打印结构化日志
-        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [ALERT_PREP] asset={asset} exchange={exchange} options_legs={options_count} non_options_legs={len(non_options_legs)} options_sum={options_sum} threshold={threshold} trigger={options_sum > threshold}")
+        # ⚠️ 修正：使用 options_sum（整笔订单期权腿总张数）+ 净权利金做阈值判断
+        # 获取净权利金相关字段
+        premium_paid_usd = trade_info.get('premium_paid_usd', None)
+        premium_received_usd = trade_info.get('premium_received_usd', None)
+        net_premium_usd = trade_info.get('net_premium_usd', None)
+        abs_net_premium_usd = trade_info.get('abs_net_premium_usd', None)
+        premium_threshold_usd = 1_000_000  # 硬编码 1,000,000 USD
 
-        # 打印每条腿的详细信息（debug级别）
-        for i, leg in enumerate(options_legs, 1):
-            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [ALERT_LEG] leg#{i} type=OPTIONS side={leg.get('side')} contract={leg.get('contract')} volume={leg.get('volume')} price_btc={leg.get('price_btc')} total_usd={leg.get('total_usd')} ref={leg.get('ref_spot_usd')}")
+        # 判断两种预警条件
+        volume_trigger = options_sum > threshold
+        premium_trigger = False
+        if abs_net_premium_usd is not None:
+            premium_trigger = abs_net_premium_usd >= premium_threshold_usd
 
-        # 检查是否超过阈值（基于 options_sum）
-        if options_sum <= threshold:
-            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [ALERT_SKIP] reason=below_threshold asset={asset} options_sum={options_sum} threshold={threshold} msg_id={msg_id}")
-            return
-
-        # 打印 Ref 提取日志（使用推导字段）
+        # 提取共享字段（用于预警）
         ref_price_usd = trade_info.get('ref_price_usd', None)
         spot_price_derived = trade_info.get('spot_price_derived', 'N/A')
         options_contracts = trade_info.get('options_contracts', [])
         contracts_str = ', '.join(options_contracts) if options_contracts else 'Unknown'
+
+        # 打印结构化日志（包含两种预警的条件）
+        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [ALERT_PREP] msg_id={msg_id} asset={asset} exchange={exchange} options_legs={options_count} non_options_legs={len(non_options_legs)} options_sum={options_sum} premium_paid_usd={premium_paid_usd if premium_paid_usd is not None else 'N/A'} premium_received_usd={premium_received_usd if premium_received_usd is not None else 'N/A'} net_premium_usd={net_premium_usd if net_premium_usd is not None else 'N/A'} abs_net_premium_usd={abs_net_premium_usd if abs_net_premium_usd is not None else 'N/A'} thresholds:vol={threshold} prem={premium_threshold_usd} volume_trigger={volume_trigger} premium_trigger={premium_trigger}")
+
+        # 打印每条腿的详细信息（debug级别）
+        for i, leg in enumerate(options_legs, 1):
+            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [ALERT_LEG] leg#{i} type=OPTIONS side={leg.get('side')} contract={leg.get('contract')} volume={leg.get('volume')} price_btc={leg.get('price_btc')} total_usd={leg.get('total_usd')} ref={leg.get('ref_spot_usd')}")
 
         if ref_price_usd is not None:
             print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [ALERT] ref_extracted=true ref_price_usd={ref_price_usd} spot_price={spot_price_derived} contracts={contracts_str} msg_id={msg_id}")
         else:
             print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [ALERT] ref_extracted=false reason=no_ref_in_text contracts={contracts_str} msg_id={msg_id}")
 
-        # ✅ 发送预警邮件（OPTIONS ONLY）
-        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [ALERT_SEND] asset={asset} options_sum={options_sum} options_legs={options_count} threshold={threshold} contracts={contracts_str} msg_id={msg_id}")
+        # ============================================
+        # STEP 2：预警入口判断（合并邮件）
+        # ============================================
+        # 硬规则：如果同时满足 volume + premium 条件，合并成一封邮件
+        # 否则，只发送满足条件的那一类预警
+
+        # 判断是否需要发送预警
+        should_send_alert = volume_trigger or premium_trigger
+
+        if not should_send_alert:
+            # 两种预警都未触发
+            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [ALERT_SKIP] reason=both_below_threshold asset={asset} options_sum={options_sum} volume_threshold={threshold} abs_net_premium_usd={abs_net_premium_usd if abs_net_premium_usd is not None else 'N/A'} premium_threshold={premium_threshold_usd} msg_id={msg_id}")
+            return
+
+        # 确定预警原因（reasons）
+        reasons = []
+        if volume_trigger:
+            reasons.append('volume')
+        if premium_trigger:
+            reasons.append('premium')
+        reasons_str = ','.join(reasons)
+
+        # 打印触发日志
+        if volume_trigger and premium_trigger:
+            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [ALERT_MULTI] asset={asset} msg_id={msg_id} reasons={reasons_str}")
+
+        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [ALERT_SEND] msg_id={msg_id} reasons={reasons_str} asset={asset} options_sum={options_sum} abs_net_premium_usd={abs_net_premium_usd if abs_net_premium_usd is not None else 'N/A'} contracts={contracts_str}")
+
+        # 发送合并预警邮件
+        from email_sender import send_single_trade_alert_html
 
         success = send_single_trade_alert_html(
             trade_info=trade_info,
             message_data=message_data,
             threshold=threshold,
-            lang='zh'  # 正式启用中文模板
+            alert_reasons=reasons,  # 传递预警原因列表
+            lang='zh'
         )
 
         if not success:
-            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [ALERT] alert_failed msg_id={msg_id} error=email_send_failed")
+            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [ALERT] alert_failed msg_id={msg_id} reasons={reasons_str} error=email_send_failed")
 
     except Exception as e:
         print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [ALERT] alert_failed error={e}")

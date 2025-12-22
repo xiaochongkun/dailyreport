@@ -74,11 +74,29 @@ SMTP_USE_TLS = os.getenv('SMTP_USE_TLS', 'true').lower() == 'true'
 EMAIL_SENDER = os.getenv('EMAIL_SENDER', 'kunkka@signalplus.com')
 EMAIL_PASSWORD = os.getenv('EMAIL_PASSWORD', '')  # Gmail 应用专用密码
 
-# 收件人配置
+# ============================================
+# 邮件路由配置（隔离测试/正式收件人）
+# ============================================
+# 邮件模式：test（测试）/ prod（正式）
+EMAIL_MODE = os.getenv('EMAIL_MODE', 'prod').lower()
+
+# 测试收件人（固定白名单，用于调试/验证）
+TEST_RECIPIENTS = os.getenv('TEST_RECIPIENTS', 'kunkka@signalplus.com')
+
+# 正式收件人（线上订阅用户）
+PROD_RECIPIENTS = os.getenv('PROD_RECIPIENTS', 'parabolic.09@pm.me,kunkka@signalplus.com')
+
+# 强制测试标题前缀（test 模式自动加 🧪 [TEST]）
+FORCE_TEST_SUBJECT_PREFIX = os.getenv('FORCE_TEST_SUBJECT_PREFIX', 'true').lower() == 'true'
+
+# 旧配置（向后兼容，优先使用上面的路由配置）
 EMAIL_RECIPIENTS = os.getenv('EMAIL_RECIPIENTS', 'kunkka@signalplus.com').split(',')
 
 # 邮件发送时间配置
 EMAIL_SEND_TIME = os.getenv('EMAIL_SEND_TIME', '16:05')  # 邮件发送时间（日报生成后5分钟）
+
+# Dry Run 模式（只打印不发送，用于验证路由）
+EMAIL_DRY_RUN = os.getenv('EMAIL_DRY_RUN', 'false').lower() == 'true'
 
 # ============================================
 # 阈值预警配置（单笔大宗交易）
@@ -95,6 +113,13 @@ ETH_VOLUME_THRESHOLD = int(os.getenv('ETH_VOLUME_THRESHOLD', '5000'))  # ETH opt
 # 测试模式（用于测试邮件，ETH 阈值临时降低）
 ALERT_TEST_MODE = os.getenv('ALERT_TEST_MODE', 'false').lower() == 'true'
 ETH_VOLUME_THRESHOLD_TEST = int(os.getenv('ETH_VOLUME_THRESHOLD_TEST', '1000'))  # 测试模式下 ETH 阈值
+
+# ============================================
+# 权利金预警配置（单笔大宗交易）
+# ============================================
+# 权利金阈值：整笔订单期权腿总权利金（USD）超过此值时触发预警
+# ✅ OPTIONS ONLY：只对期权（OPTIONS）触发预警，PERPETUAL/FUTURES 一律跳过
+PREMIUM_USD_THRESHOLD = int(os.getenv('PREMIUM_USD_THRESHOLD', '1000000'))  # 默认 1,000,000 USD
 
 # ============================================
 # 日报模板版本
@@ -159,6 +184,17 @@ def print_config():
     print(f"REPORT_WINDOW_HOURS: {REPORT_WINDOW_HOURS}")
     print(f"EMAIL_ENABLED: {EMAIL_ENABLED}")
     print("=" * 60)
+
+
+def print_email_config():
+    """打印邮件路由配置（启动时必须调用）"""
+    mode = EMAIL_MODE
+    test_recipients = TEST_RECIPIENTS
+    prod_recipients = PROD_RECIPIENTS
+    force_test_prefix = FORCE_TEST_SUBJECT_PREFIX
+    dry_run = EMAIL_DRY_RUN
+
+    print(f"[EMAIL_CFG] mode={mode} test_recipients={test_recipients} prod_recipients={prod_recipients} force_test_prefix={force_test_prefix} dry_run={dry_run}")
 
 
 if __name__ == '__main__':

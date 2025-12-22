@@ -1327,6 +1327,95 @@ def parse_block_trade_message(text):
     # 修正 contract_list：所有期权合约列表（用于预警显示）
     result['options_contracts'] = [leg.get('contract', 'Unknown') for leg in result['options_legs']]
 
+    # ============================================
+    # STEP 1：计算「净权利金（Premium Net Exposure）」- 预警专用推导字段
+    # ============================================
+    # 硬规则：只从 options_legs 推导，不使用全局正则抓到的字段
+    premium_paid_usd = 0.0       # 买入支付的权利金（LONG/Bought）
+    premium_received_usd = 0.0   # 卖出收到的权利金（SHORT/Sold）
+    premium_legs_detail = []      # 每条腿的详细信息
+
+    # 获取 ref_price_usd（币价）
+    ref_price = result.get('ref_price_usd', None)
+    premium_calculation_failed = False
+
+    for i, leg in enumerate(result['options_legs'], 1):
+        leg_contract = leg.get('contract', 'Unknown')
+        leg_side = leg.get('side', 'Unknown')  # LONG / SHORT
+        leg_volume = leg.get('volume', 0)
+        leg_total_usd = None
+        total_usd_source = 'missing'
+
+        # 方法1：优先从 leg['total_usd'] 直接取
+        if leg.get('total_usd') is not None:
+            leg_total_usd = leg['total_usd']
+            total_usd_source = 'direct'
+
+        # 方法2：若有 total_btc 且有 ref_price_usd
+        elif leg.get('total_btc') is not None and ref_price is not None:
+            leg_total_usd = leg['total_btc'] * ref_price
+            total_usd_source = 'derived_from_total_btc'
+
+        # 方法3：若只有 price_btc/volume 且有 ref_price_usd
+        elif leg.get('price_btc') is not None and leg_volume > 0 and ref_price is not None:
+            total_btc_leg = leg['price_btc'] * leg_volume
+            leg_total_usd = total_btc_leg * ref_price
+            total_usd_source = 'derived_from_price_btc'
+
+        # 记录每条腿的计算结果
+        if leg_total_usd is not None:
+            # 根据方向累加到 paid 或 received
+            if leg_side == 'LONG':
+                premium_paid_usd += abs(leg_total_usd)
+            elif leg_side == 'SHORT':
+                premium_received_usd += abs(leg_total_usd)
+
+            premium_legs_detail.append({
+                'leg': i,
+                'contract': leg_contract,
+                'side': leg_side,
+                'volume': leg_volume,
+                'total_usd': leg_total_usd,
+                'source': total_usd_source
+            })
+
+            # 输出结构化日志
+            print(f"[PREMIUM_DERIVE] leg#={i} contract={leg_contract} side={leg_side} volume={leg_volume} total_usd={leg_total_usd:.2f} total_usd_source={total_usd_source} ref={ref_price}")
+        else:
+            # 无法计算此腿的 total_usd
+            premium_calculation_failed = True
+            premium_legs_detail.append({
+                'leg': i,
+                'contract': leg_contract,
+                'side': leg_side,
+                'volume': leg_volume,
+                'total_usd': 0.0,
+                'source': 'missing'
+            })
+            print(f"[PREMIUM_DERIVE] leg#={i} contract={leg_contract} side={leg_side} volume={leg_volume} total_usd=MISSING reason=missing_total_usd total_btc={leg.get('total_btc', 'N/A')} price_btc={leg.get('price_btc', 'N/A')} ref={ref_price}")
+
+    # 计算净权利金
+    net_premium_usd = premium_received_usd - premium_paid_usd
+    abs_net_premium_usd = abs(net_premium_usd)
+
+    # 汇总日志
+    if not premium_calculation_failed and result['options_legs']:
+        print(f"[PREMIUM_NET] asset={result['asset']} options_legs={len(result['options_legs'])} premium_paid_usd={premium_paid_usd:.2f} premium_received_usd={premium_received_usd:.2f} net_premium_usd={net_premium_usd:.2f} abs_net_premium_usd={abs_net_premium_usd:.2f} ref={ref_price}")
+        result['premium_paid_usd'] = premium_paid_usd
+        result['premium_received_usd'] = premium_received_usd
+        result['net_premium_usd'] = net_premium_usd
+        result['abs_net_premium_usd'] = abs_net_premium_usd
+        result['premium_legs_detail'] = premium_legs_detail
+    else:
+        # 无法计算净权利金（缺失数据）
+        result['premium_paid_usd'] = None
+        result['premium_received_usd'] = None
+        result['net_premium_usd'] = None
+        result['abs_net_premium_usd'] = None
+        result['premium_legs_detail'] = premium_legs_detail
+        if result['options_legs']:
+            print(f"[PREMIUM_NET] asset={result['asset']} options_legs={len(result['options_legs'])} net_premium_usd=UNKNOWN reason=missing_ref_or_price_data")
+
     return result
 
 
